@@ -23,7 +23,7 @@ def train(
     device: torch.device,
 ):
     ct = datetime.datetime.now()
-    date_str = ct.strftime("%m_%d_%H_%M_%S")
+    date_str = f"{config.logging.run_name or ""}_" + ct.strftime("%m_%d_%H_%M_%S")
 
     dir = os.path.join("./checkpoints", date_str)
     os.makedirs(dir, exist_ok=False)

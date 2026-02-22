@@ -25,10 +25,10 @@ teacher_solver_config:
   guidance_scale: null
 
 student_solver_config:
-  steps: null
+  steps: 5
   order: null
   t_eps: 0.001
-  t_parametrization: ar_model
+  t_parametrization: mu_logit
   use_theory_coef: true
   guidance_scale: null
 
@@ -38,15 +38,9 @@ student_solver_config:
     disc_weight: 0.1
     disc_type: CIFAR10
     disc_lr: 0.00001
-  
-  ar_config:
-    d_model: 128
-    dim_ff: 128
-    nhead: 4
-    dropout: 0
 
 training:
-  n_iters: 10000
+  n_iters: 2845
   lr: 0.001
   iters_to_accumulate: 1
   ema_decay: 0.999
@@ -56,4 +50,4 @@ logging:
   eval_freq: 500
   checkpoint_freq: 500
   log_weights_freq: 10
-  run_name: ar_model_nfe_4
+  run_name: mu_logit_nfe_4
