@@ -40,7 +40,7 @@ student_solver_config:
     disc_lr: 0.00001
 
 training:
-  n_iters: 10000
+  n_iters: 2845
   lr: 0.001
   iters_to_accumulate: 1
   ema_decay: 0.999
