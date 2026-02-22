@@ -18,7 +18,7 @@ class LearnedLengthAwarePE(nn.Module):
             nn.Linear(hidden_dim, ar_config.d_model * 2)
         )
 
-    def forward(self, seq_len, device="cpu"):
+    def forward(self, seq_len, device="cuda"):
         pos = torch.arange(start=1, end=seq_len + 1, device=device).float()
         p = pos / seq_len
         features = torch.stack([p, torch.sin(p * torch.pi), torch.cos(p * torch.pi)], dim=-1)
