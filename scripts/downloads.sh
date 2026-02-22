@@ -31,7 +31,7 @@ wget -O pretrained/edm/edm-cifar10-32x32-uncond-vp.pkl https://nvlabs-fi-cdn.nvi
 
 
 # FID reference statistics
-# mkdir fid-refs/edm
+mkdir fid-refs/edm
 # wget -O fid-refs/edm/afhqv2-64x64.npz https://nvlabs-fi-cdn.nvidia.com/edm/fid-refs/afhqv2-64x64.npz
 # wget -O fid-refs/edm/ffhq-64x64.npz https://nvlabs-fi-cdn.nvidia.com/edm/fid-refs/ffhq-64x64.npz
 wget -O fid-refs/edm/cifar10-32x32.npz https://nvlabs-fi-cdn.nvidia.com/edm/fid-refs/cifar10-32x32.npz
