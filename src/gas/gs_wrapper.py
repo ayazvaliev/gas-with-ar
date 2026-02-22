@@ -11,6 +11,7 @@ from src.gas.base_model import BaseModel
 from src.gas.generalized_solver import GeneralizedSolver
 from src.gas.adversarial_module.dist_adv_loss import DistAdversarialTraining
 from src.gas.synt_data import SyntDataType
+from src.gas.ar.model import ARModel
 
 class GSWrapper(nn.Module):
     """Generalised Solver wrapper. 
@@ -63,16 +64,23 @@ class GSWrapper(nn.Module):
         self.order = self.solver_config.order
 
         # init t steps
-        assert self.solver_config.t_parametrization == "mu_logit"
         self.eps_mu_offset = 1e-5
-        self.mu_logit = nn.Parameter(torch.ones(self.steps - 1), requires_grad=True)
-        t_unif = torch.linspace(1., self.t_eps, self.steps + 1).flip(0)
-        self.mu_logit.data = self.get_inv_t_steps(t_unif)
-
-        solver.get_time_steps = lambda **kwargs: self.get_t_steps(**kwargs)
+        if self.solver_config.t_parametrization == "mu_logit":
+            self.mu_logit = nn.Parameter(torch.ones(self.steps - 1), requires_grad=True)
+            t_unif = torch.linspace(1., self.t_eps, self.steps + 1).flip(0)
+            self.mu_logit.data = self.get_inv_t_steps(t_unif)
+            self.act = torch.nn.functional.sigmoid
+            use_ar = False
+        elif self.solver_config.t_parametrization == "ar_model":
+            self.ar_model = ARModel(solver_config.ar_config)
+            self.act = lambda x: 0.5 * (torch.nn.functional.softsign(x) + 1)
+            use_ar = True
+        else:
+            raise NotImplementedError()
+        solver.get_time_steps = lambda **kwargs: self.get_t_steps(use_ar=use_ar, **kwargs)
 
         # init t_couple
-        self.t_couple = nn.Parameter(torch.zeros(self.steps), requires_grad=True)
+        self.t_couple = nn.Parameter(torch.zeros(self.steps), requires_grad=False)
         solver.t_couple = self.t_couple
 
         # init coef
@@ -80,11 +88,11 @@ class GSWrapper(nn.Module):
             cname, aname = f'c{i}_diff', f'a{i}_diff'
 
             self.register_parameter(
-                param=nn.Parameter(torch.zeros(self.steps), requires_grad=True),
+                param=nn.Parameter(torch.zeros(self.steps), requires_grad=False),
                 name=cname
             )
             self.register_parameter(
-                param=nn.Parameter(torch.zeros(self.steps), requires_grad=True),
+                param=nn.Parameter(torch.zeros(self.steps), requires_grad=False),
                 name=aname
             )
 
@@ -105,9 +113,11 @@ class GSWrapper(nn.Module):
     # timesteps logic
     def get_t_steps(self, **kwargs) -> torch.Tensor:
         """Get generation timesteps."""
-        logits = self.mu_logit
+        if kwargs.get("use_ar", False):
+            logits = self.ar_model(self.steps - 1)
+        else:
+            logits = self.mu_logit
         t = self.get_mu_t_steps(logits)
-        
         return t.flip(0)
     
     def get_mu_t_steps(self, mu_logit: torch.Tensor) -> torch.Tensor:
@@ -116,7 +126,7 @@ class GSWrapper(nn.Module):
         """
         t_offset = self.t_eps
 
-        mu = mu_logit.sigmoid()
+        mu = self.act(mu_logit)
         mu = mu * (1 - 2 * self.eps_mu_offset) + self.eps_mu_offset
 
         t_steps = 1 - torch.cumprod(mu, 0)

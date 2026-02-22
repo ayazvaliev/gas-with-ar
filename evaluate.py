@@ -2,10 +2,10 @@ from collections import defaultdict
 
 import torch
 
-import wandb
 from src.gas.gs_wrapper import GSWrapper
 from src.gas.synt_data import SyntDataLoaders
 from src.gas.utils.loggers import log_end_img, log_t_steps_plot
+from comet_ml import Experiment
 
 NOT_LOG_KEYS = ["timesteps", "x0_s", "x0_t", "latents_s"]
 
@@ -16,7 +16,8 @@ def evaluate_wrapper(
     data: SyntDataLoaders, 
     device: torch.device, 
     suff: str, 
-    global_step: int
+    global_step: int,
+    experiment: Experiment, 
 ) -> None:
     """Evaluating GS on test dataset and visualization batch for logging."""
     batch = [v.to(device) if isinstance(v, torch.Tensor) else v for v in data.vis_batch]
@@ -28,6 +29,7 @@ def evaluate_wrapper(
         t_steps=out_d["timesteps"],
         global_step=global_step,
         key=f"eval_image{suff}/t_steps",
+        experiment=experiment
     )
     for k, v in out_d.items():
         if k not in NOT_LOG_KEYS:
@@ -40,6 +42,7 @@ def evaluate_wrapper(
         out_d["x0_t"],
         global_step=global_step,
         key=f"vis_stat{suff}/backward_end_inter",
+        experiment=experiment
     )
 
     log_d = defaultdict(float)
@@ -57,7 +60,7 @@ def evaluate_wrapper(
         if k not in NOT_LOG_KEYS:
             d_res[f"val_stat/{k}{suff}"] = v / num_elements
 
-    wandb.log(d_res, step=global_step)
+    experiment.log_metrics(d_res, step=global_step)
     if "x0_s" not in out_d:
         out_d["x0_s"] = gs_wrapper.model.decode(out_d["latents_s"])
     log_end_img(
@@ -65,4 +68,5 @@ def evaluate_wrapper(
         out_d["x0_t"],
         global_step=global_step,
         key=f"val_stat{suff}/backward_end_inter",
+        experiment=experiment
     )
