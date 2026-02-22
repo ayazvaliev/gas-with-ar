@@ -12,7 +12,7 @@ from src.gas.gs_wrapper import GSWrapper
 def log_plt_fig(fig, key: str, global_step: int, experiment: Experiment) -> None:
     fig.tight_layout()
     
-    buf = io.Bytes()
+    buf = io.BytesIO()
     fig.savefig(buf, format='png', bbox_inches='tight')
     buf.seek(0)
     experiment.log_image(Image.open(buf), name=key, step=global_step)
