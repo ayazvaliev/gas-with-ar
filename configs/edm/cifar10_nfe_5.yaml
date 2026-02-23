@@ -25,7 +25,7 @@ teacher_solver_config:
   guidance_scale: null
 
 student_solver_config:
-  steps: 5
+  steps: null
   order: null
   t_eps: 0.001
   t_parametrization: mu_logit
