@@ -40,7 +40,7 @@ def train(
         auto_output_logging="simple",
         log_code=True,
     )
-    experiment.set_name(f"{config.logging.run_name}_{date_str}")
+    experiment.set_name(date_str)
     experiment.log_parameters(config.to_dict)
 
     global_step = 0

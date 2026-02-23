@@ -50,4 +50,4 @@ logging:
   eval_freq: 500
   checkpoint_freq: 500
   log_weights_freq: 10
-  run_name: mu_logit_nfe_4
+  run_name: mu_logit_nfe_5
