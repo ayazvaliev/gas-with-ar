@@ -46,7 +46,7 @@ student_solver_config:
     dropout: 0
 
 training:
-  n_iters: 10000
+  n_iters: 5000
   lr: 0.001
   iters_to_accumulate: 1
   ema_decay: 0.999
