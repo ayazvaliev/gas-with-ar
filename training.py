@@ -11,7 +11,7 @@ from comet_ml import Experiment
 from evaluate import NOT_LOG_KEYS, evaluate_wrapper
 from src.gas.gs_wrapper import GSWrapper
 from src.gas.synt_data import SyntDataset
-from src.gas.utils.loggers import log_end_img, log_grads, log_t_steps, log_weights
+from src.gas.utils.loggers import log_end_img, log_grads, log_t_steps, log_weights, log_multi_nfe_t_steps
 
 
 def train(
@@ -34,6 +34,14 @@ def train(
     print(config)
     print("=" * 90 + "\n")
 
+    # Resolve iters_to_accumulate from effective_batch_size if provided
+    iters_to_accumulate = config.training.iters_to_accumulate
+    effective_batch_size = getattr(config.training, 'effective_batch_size', None)
+    if effective_batch_size is not None:
+        iters_to_accumulate = max(1, effective_batch_size // config.dataset.batch_size)
+        print(f"Gradient accumulation: effective_batch_size={effective_batch_size}, "
+              f"batch_size={config.dataset.batch_size}, iters_to_accumulate={iters_to_accumulate}")
+
     # Initialize Comet ML experiment
     experiment = Experiment(
         project_name=config.logging.project_name,
@@ -46,6 +54,8 @@ def train(
     global_step = 0
     pbar = tqdm(range(config.training.n_iters), dynamic_ncols=True)
 
+    optim.zero_grad()
+
     for _ in range(config.training.epoch_num):
         for batch in data.train_loader:
             if global_step == config.training.n_iters:
@@ -56,12 +66,12 @@ def train(
             batch = [v.to(device) if isinstance(v, torch.Tensor) else v for v in batch]
 
             res_d = gs_wrapper.forward(batch=batch, return_timesteps=True)
-            loss = res_d["loss_total"].mean() / config.training.iters_to_accumulate
+            loss = res_d["loss_total"].mean() / iters_to_accumulate
             loss.backward()
 
             log_d = {"optim/time": time.time() - t_start}
 
-            if global_step % config.training.iters_to_accumulate == 0:
+            if global_step % iters_to_accumulate == 0:
                 if global_step % config.logging.log_weights_freq == 0:
                     log_grads(model=gs_wrapper, global_step=global_step, experiment=experiment)
 
@@ -74,6 +84,15 @@ def train(
                 if global_step % config.logging.log_weights_freq == 0:
                     log_t_steps(res_d["timesteps"], global_step=global_step, experiment=experiment)
                     log_weights(model=gs_wrapper, global_step=global_step, experiment=experiment)
+                    # In mixed-NFE AR mode, log timestep curves for all NFEs
+                    nfe_list = getattr(config.dataset, 'steps_ratios', None)
+                    if nfe_list and hasattr(gs_wrapper, 'ar_model'):
+                        log_multi_nfe_t_steps(
+                            gs_wrapper=gs_wrapper,
+                            nfe_list=[int(k) for k in nfe_list.keys()],
+                            global_step=global_step,
+                            experiment=experiment,
+                        )
 
                 log_d["optim/grad_norm"] = grad_norm
                 log_d["optim/lr"] = optim.param_groups[0]["lr"]

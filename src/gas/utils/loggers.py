@@ -5,6 +5,7 @@ from torchvision.utils import make_grid
 from comet_ml import Experiment
 from PIL import Image
 import io
+from typing import Dict, List
 
 from src.gas.gs_wrapper import GSWrapper
 
@@ -113,5 +114,52 @@ def log_t_steps(t_steps: torch.Tensor, global_step: int, experiment: Experiment,
     d = {}
     for i, t in enumerate(t_steps):
         d[f"{key}/t_{i:02d}"] = t
+
+    experiment.log_metrics(d, step=global_step)
+
+
+@torch.no_grad()
+def log_multi_nfe_t_steps(
+    gs_wrapper: GSWrapper,
+    nfe_list: List[int],
+    global_step: int,
+    experiment: Experiment,
+    key_prefix: str = "t_stats",
+) -> None:
+    """Log timestep trajectories for multiple NFE values (AR mode).
+
+    For each NFE in ``nfe_list``, queries the AR model to get the predicted
+    timestep sequence and logs it both as a line plot and as individual scalar
+    metrics under ``<key_prefix>/nfe<N>/t_XX``.
+
+    Args:
+        gs_wrapper: Trained GSWrapper in AR mode.
+        nfe_list: List of student step counts to visualise.
+        global_step: Current training iteration.
+        experiment: Active CometML experiment.
+        key_prefix: Metric key prefix.
+    """
+    if not hasattr(gs_wrapper, 'ar_model'):
+        return
+
+    fig, ax = plt.subplots(1, 1, figsize=(6, 4))
+    ax.set_xlabel("Step")
+    ax.set_ylabel("Time")
+    ax.grid()
+
+    d: Dict[str, float] = {}
+    for nfe in sorted(nfe_list):
+        t_steps = gs_wrapper.get_timesteps_for_n(nfe).detach().cpu().numpy()
+        ax.plot(t_steps, label=f"NFE={nfe}")
+        for i, t in enumerate(t_steps):
+            d[f"{key_prefix}/nfe{nfe}/t_{i:02d}"] = float(t)
+
+    ax.legend()
+    buf = io.BytesIO()
+    fig.tight_layout()
+    fig.savefig(buf, format='png', bbox_inches='tight')
+    buf.seek(0)
+    experiment.log_image(Image.open(buf), name=f"{key_prefix}/all_nfe_t_steps", step=global_step)
+    plt.close("all")
 
     experiment.log_metrics(d, step=global_step)

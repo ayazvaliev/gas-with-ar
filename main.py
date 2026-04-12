@@ -27,8 +27,10 @@ from training import train
 @click.option(
     "--student_step",
     metavar="INT",
-    type=click.IntRange(4, 10),
-    help="Number of student steps.",
+    type=click.IntRange(4, 20),
+    default=None,
+    help="Number of student steps. Required for single-NFE training; "
+         "optional for mixed-NFE AR training (steps come from the dataset).",
 )
 @click.option(
     "--teacher_pkl",
@@ -68,8 +70,33 @@ def main(
     # Setup student solver config
     solver_config = config.student_solver_config
     solver_config.loss_config.loss_type = loss_type
-    solver_config.steps = student_step
-    solver_config.order = student_step
+
+    # Determine steps: CLI arg takes priority; for mixed-NFE AR mode the
+    # steps can be left as null in the config (dataset provides n_steps per sample).
+    use_mixed_nfe = (
+        getattr(dataset_config, 'steps_ratios', None) is not None
+        and solver_config.t_parametrization == "ar_model"
+    )
+    if student_step is not None:
+        solver_config.steps = student_step
+        solver_config.order = student_step
+    elif use_mixed_nfe:
+        # In mixed-NFE mode the AR model handles varying step counts at runtime.
+        # solver_config.steps must still be set so GSWrapper can size internal
+        # fixed-size parameters (t_couple, c_diff, a_diff) to at least the
+        # maximum step count that will be used during training.
+        if solver_config.steps is None:
+            max_nfe = max(int(k) for k in dataset_config.steps_ratios.keys())
+            solver_config.steps = max_nfe
+            solver_config.order = max_nfe
+        else:
+            # steps is already set in config; keep it as-is (user chose the max).
+            solver_config.order = solver_config.steps
+    else:
+        raise click.UsageError(
+            "--student_step is required when not using mixed-NFE AR training "
+            "(i.e. when dataset.steps_ratios is not set or t_parametrization != 'ar_model')."
+        )
 
     solver_config.student_name = "_".join(
         f"{k}={v}" for k, v in solver_config.items() if k != "loss_config"

@@ -65,6 +65,7 @@ class GSWrapper(nn.Module):
 
         # init t steps
         self.eps_mu_offset = 1e-5
+        self._current_n_steps = self.steps  # used by get_time_steps for AR mode
         if self.solver_config.t_parametrization == "mu_logit":
             self.mu_logit = nn.Parameter(torch.ones(self.steps - 1), requires_grad=True)
             t_unif = torch.linspace(1., self.t_eps, self.steps + 1).flip(0)
@@ -77,7 +78,11 @@ class GSWrapper(nn.Module):
             use_ar = True
         else:
             raise NotImplementedError()
-        solver.get_time_steps = lambda **kwargs: self.get_t_steps(use_ar=use_ar, **kwargs)
+        solver.get_time_steps = lambda **kwargs: self.get_t_steps(
+            use_ar=use_ar,
+            n_steps=self._current_n_steps,
+            **kwargs
+        )
 
         # init t_couple
         self.t_couple = nn.Parameter(torch.zeros(self.steps), requires_grad=False)
@@ -112,9 +117,15 @@ class GSWrapper(nn.Module):
 
     # timesteps logic
     def get_t_steps(self, **kwargs) -> torch.Tensor:
-        """Get generation timesteps."""
+        """Get generation timesteps.
+
+        When ``n_steps`` is supplied via kwargs (set by student_sampler_fn for
+        mixed-NFE AR training), the AR model generates logits for that step
+        count instead of the default ``self.steps``.
+        """
         if kwargs.get("use_ar", False):
-            logits = self.ar_model(self.steps - 1)
+            n_steps = kwargs.get("n_steps", self.steps)
+            logits = self.ar_model(n_steps - 1)
         else:
             logits = self.mu_logit
         t = self.get_mu_t_steps(logits)
@@ -149,6 +160,18 @@ class GSWrapper(nn.Module):
 
         return t_steps.logit()
     
+    @torch.no_grad()
+    def get_timesteps_for_n(self, n_steps: int) -> torch.Tensor:
+        """Return solver timesteps for a specific n_steps value.
+
+        Only meaningful in AR mode (t_parametrization='ar_model').
+        Falls back to the default self.steps in mu_logit mode.
+        """
+        self._current_n_steps = n_steps
+        t = self.solver.get_time_steps()
+        self._current_n_steps = self.steps
+        return t
+
     # utilities
     def load_checkpoint(self, checkpoint_path: str) -> None:
         """Loads EMA parameters checkpoint."""
@@ -177,47 +200,98 @@ class GSWrapper(nn.Module):
         )
         return solver
 
-    def student_sampler_fn(self, noise: torch.Tensor, **kwargs) -> Tuple[Optional[torch.Tensor], torch.Tensor]:
-        """Calls `sample` method of the Generalised Solver. 
-        
+    def student_sampler_fn(
+        self,
+        noise: torch.Tensor,
+        n_steps: Optional[int] = None,
+        **kwargs,
+    ) -> Tuple[Optional[torch.Tensor], torch.Tensor]:
+        """Calls `sample` method of the Generalised Solver.
+
         Args:
             noise (torch.Tensor): An initial noise tensor to start sampling process from.
-        
+            n_steps (int, optional): Override the default step count (for AR mixed-NFE
+                training). When provided, the AR model generates logits for this many steps.
+
         Returns:
             None: A placeholder for consistency with latent models.
             torch.tensor: Sampled images
         """
+        steps = n_steps if n_steps is not None else self.steps
+        order = steps
+        self._current_n_steps = steps
         images = self.solver.sample(
             x=noise,
-            steps=self.steps,
-            order=self.order,
+            steps=steps,
+            order=order,
         )
+        self._current_n_steps = self.steps  # reset to default
         return None, images
-    
+
+    def _run_student_mixed_nfe(
+        self,
+        noise: torch.Tensor,
+        n_steps_batch: torch.Tensor,
+    ) -> torch.Tensor:
+        """Run student sampler for a batch with per-sample n_steps.
+
+        Samples within each unique n_steps group are processed together, then
+        reconstructed in the original batch order. Gradient flow is preserved.
+        """
+        unique_steps = torch.unique(n_steps_batch)
+        batch_order: List[int] = []
+        group_imgs: List[torch.Tensor] = []
+
+        for n in unique_steps:
+            mask = (n_steps_batch == n).nonzero(as_tuple=True)[0]
+            _, student_imgs_n = self.student_sampler_fn(noise[mask], n_steps=n.item())
+            group_imgs.append(student_imgs_n)
+            batch_order.extend(mask.tolist())
+
+        all_student = torch.cat(group_imgs, dim=0)
+        restore_order = torch.argsort(
+            torch.tensor(batch_order, device=noise.device)
+        )
+        return all_student[restore_order]
+
     # training function
     def forward(self, batch: SyntDataType, return_timesteps: bool = False, is_train: bool = True) -> dict:
         """Forward function used in training loop. Evaluates solver and calculates losses.
-        
+
         Args:
-            batch (SyntDataType): Dataset tuple of size 4. 
-                First two arguments are treated like torch.Tensor noise and images samples.
-                Second two arguments are optional and can be used in GSWrapperLatent for latent diffusion models.
-                They are treated as latents tensors and conditions.
+            batch (SyntDataType): Dataset tuple of size 4 or 5.
+                Elements: noise, images, latents (optional), conditions (optional),
+                and optionally n_steps per sample (torch.LongTensor).
+                When n_steps is provided and t_parametrization is 'ar_model', the
+                student is run separately for each unique step count in the batch.
             return_timesteps (bool): Flag whether to return timestep of the current step.
-            is_train (bool): Flag whether forward is called in the train loop. 
+            is_train (bool): Flag whether forward is called in the train loop.
                 Used in `discriminator_step` method of an DistAdversarialTraining instance.
-            
+
         Returns:
-            dict: Dictionary of all losses and model outputs. 
+            dict: Dictionary of all losses and model outputs.
                 Has `loss_total` key as a weighted sum of adversarial and distillation losses.
         """
-        assert len(batch) == 4, f"len(batch) is expected to be 4, yours is {len(batch)}"
-        noise, images, _, _ = batch
+        assert len(batch) in (4, 5), f"len(batch) is expected to be 4 or 5, yours is {len(batch)}"
+        n_steps_batch = batch[4] if len(batch) == 5 else None
+        noise, images = batch[0], batch[1]
+
+        use_mixed_nfe = (
+            n_steps_batch is not None
+            and self.solver_config.t_parametrization == "ar_model"
+        )
 
         d = {}
         if return_timesteps:
+            first_n = n_steps_batch[0].item() if use_mixed_nfe else self.steps
+            self._current_n_steps = first_n
             d['timesteps'] = self.solver.get_time_steps()
-        _, student_images = self.student_sampler_fn(noise)
+            self._current_n_steps = self.steps
+
+        if use_mixed_nfe:
+            student_images = self._run_student_mixed_nfe(noise, n_steps_batch)
+        else:
+            _, student_images = self.student_sampler_fn(noise)
 
         d['loss_l1'] = torch.abs(student_images - images).mean((1, 2, 3))
         d['loss_l2'] = torch.square(student_images - images).mean((1, 2, 3))
@@ -273,12 +347,16 @@ class GSWrapperLatent(GSWrapper):
         noise: torch.Tensor,
         decode: bool = False,
         condition: Any = None,
+        n_steps: Optional[int] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """Calls `sample` method of the Generalised Solver. 
-        
+        """Calls `sample` method of the Generalised Solver.
+
         Args:
             noise (torch.Tensor): An initial noise tensor to start sampling process from.
-        
+            decode (bool): If True, decode latents to images.
+            condition: Optional conditioning.
+            n_steps (int, optional): Override step count for AR mixed-NFE training.
+
         Returns:
             torch.Tensor: Predicted latents that are the direct output of the model.
             Optional[torch.Tensor]: Predicted images (decoded latents).
@@ -288,28 +366,74 @@ class GSWrapperLatent(GSWrapper):
         if condition is not None:
             self.model.set_condition(condition)
 
+        steps = n_steps if n_steps is not None else self.steps
+        order = steps
+        self._current_n_steps = steps
         latents = self.solver.sample(
             x=noise,
-            steps=self.steps,
-            order=self.order,
+            steps=steps,
+            order=order,
         )
+        self._current_n_steps = self.steps  # reset
 
         if decode:
             images = self.model.decode(latents)
 
         return latents, images
-    
+
+    def _run_student_mixed_nfe(
+        self,
+        noise: torch.Tensor,
+        n_steps_batch: torch.Tensor,
+        condition: Any = None,
+    ) -> torch.Tensor:
+        """Run student sampler for a latent-model batch with per-sample n_steps."""
+        unique_steps = torch.unique(n_steps_batch)
+        batch_order: List[int] = []
+        group_latents: List[torch.Tensor] = []
+
+        for n in unique_steps:
+            mask = (n_steps_batch == n).nonzero(as_tuple=True)[0]
+            cond_n = None
+            if condition is not None:
+                if isinstance(condition, torch.Tensor):
+                    cond_n = condition[mask]
+                else:
+                    cond_n = [condition[i] for i in mask.tolist()]
+            latents_n, _ = self.student_sampler_fn(noise[mask], condition=cond_n, n_steps=n.item())
+            group_latents.append(latents_n)
+            batch_order.extend(mask.tolist())
+
+        all_latents = torch.cat(group_latents, dim=0)
+        restore_order = torch.argsort(
+            torch.tensor(batch_order, device=noise.device)
+        )
+        return all_latents[restore_order]
+
     def forward(self, batch: SyntDataType, return_timesteps: bool = False, is_train: bool = True) -> dict:
-        assert len(batch) == 4, f"len(batch) is expected to be 4, yours is {len(batch)}"
-        noise, images, latents, condition = batch
+        assert len(batch) in (4, 5), f"len(batch) is expected to be 4 or 5, yours is {len(batch)}"
+        n_steps_batch = batch[4] if len(batch) == 5 else None
+        noise, images, latents, condition = batch[0], batch[1], batch[2], batch[3]
+
+        use_mixed_nfe = (
+            n_steps_batch is not None
+            and self.solver_config.t_parametrization == "ar_model"
+        )
 
         d = {}
         if return_timesteps:
+            first_n = n_steps_batch[0].item() if use_mixed_nfe else self.steps
+            self._current_n_steps = first_n
             d['timesteps'] = self.solver.get_time_steps()
-        student_latents, _ = self.student_sampler_fn(
-            noise,
-            condition=condition
-        )
+            self._current_n_steps = self.steps
+
+        if use_mixed_nfe:
+            student_latents = self._run_student_mixed_nfe(noise, n_steps_batch, condition=condition)
+        else:
+            student_latents, _ = self.student_sampler_fn(
+                noise,
+                condition=condition
+            )
 
         d['loss_l1_latents'] = torch.abs(latents - student_latents).mean((1, 2, 3))
         d['loss_l2_latents'] = torch.square(latents - student_latents).mean((1, 2, 3))
