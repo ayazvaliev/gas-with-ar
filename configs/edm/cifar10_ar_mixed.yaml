@@ -8,7 +8,7 @@ model:
   guidance_scale: null
 
 dataset:
-  teacher_pkl: data/teachers/edm/cifar10/teacher_dataset.pkl
+  teacher_pkl: data/teachers/edm/cifar10/dataset.pkl
   use_latents: false
   use_condition: false
   train_size: 1400

@@ -149,7 +149,7 @@ def log_multi_nfe_t_steps(
 
     d: Dict[str, float] = {}
     for nfe in sorted(nfe_list):
-        t_steps = gs_wrapper.get_timesteps_for_n(nfe).detach().cpu().numpy()
+        t_steps = gs_wrapper.solver.get_time_steps(n_steps=nfe).detach().cpu().numpy()
         ax.plot(t_steps, label=f"NFE={nfe}")
         for i, t in enumerate(t_steps):
             d[f"{key_prefix}/nfe{nfe}/t_{i:02d}"] = float(t)
