@@ -228,10 +228,10 @@ def _generate_batches(
 )
 @click.option(
     "--test_size",
-    help="Number of seeds taken from the END of the seed range and reserved as "
-         "test data. These are split equally across all step counts and saved to "
-         "out/dataset/test/<N>/. Must be divisible by the number of step counts "
-         "and less than the total seed count. Only used with create_dataset=True.",
+    help="Number of seeds taken from the END of the seed range and used as test "
+         "data for EVERY step count (e.g. test_size=1000 with nfe={4,5} produces "
+         "1000 test samples for each). Saved to out/dataset/test/<N>/. Must be "
+         "less than the total seed count. Only used with create_dataset=True.",
     metavar="INT",
     type=int,
     default=0,
@@ -286,11 +286,6 @@ def main(
             f"--test_size ({test_size}) must be less than the total number of seeds "
             f"({len(all_seeds)})"
         )
-        assert test_size % len(steps_list) == 0, (
-            f"--test_size ({test_size}) must be divisible by the number of step counts "
-            f"({len(steps_list)}) so each step count gets exactly the same number of "
-            f"test samples"
-        )
         test_seeds = all_seeds[-test_size:]
         train_seeds = all_seeds[:-test_size]
     else:
@@ -308,15 +303,11 @@ def main(
         train_seeds_per_nfe[nfe] = train_seeds[offset: offset + n]
         offset += n
 
-    # Distribute test seeds equally
+    # Same test seeds for every NFE
     test_seeds_per_nfe: dict = {}
     if test_seeds:
-        per_nfe_test = len(test_seeds) // len(steps_list)
-        offset = 0
-        for i, nfe in enumerate(steps_list):
-            n = len(test_seeds) - offset if i == len(steps_list) - 1 else per_nfe_test
-            test_seeds_per_nfe[nfe] = test_seeds[offset: offset + n]
-            offset += n
+        for nfe in steps_list:
+            test_seeds_per_nfe[nfe] = test_seeds
 
     dist.print0(
         f"Seed distribution — train: "
