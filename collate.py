@@ -1,6 +1,7 @@
 import os
 import pickle
 from collections import defaultdict
+from typing import Optional
 
 import click
 import torch
@@ -12,7 +13,7 @@ from tqdm import tqdm
 # ----------------------------------------------------------------------------
 
 
-def _collate_dir(step_dir: str, max_samples: int | None) -> dict:
+def _collate_dir(step_dir: str, max_samples: Optional[int]) -> dict:
     """Load and concatenate all .pt files from a directory.
 
     Args:

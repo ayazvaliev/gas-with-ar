@@ -24,3 +24,4 @@ dependencies:
     - ftfy==6.2.3
     - ninja==1.10.2
     - comet_ml==3.56.0
+    - click==8.1.7
