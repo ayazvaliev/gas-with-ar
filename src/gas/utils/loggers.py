@@ -86,7 +86,7 @@ def log_weights(model: GSWrapper, global_step: int, experiment: Experiment, suff
                 d[f"{key}/{t}_norm"] = np.linalg.norm(data)
                 continue
             for i, v in enumerate(data):
-                d[f"{key}_{t}/{i:02d}"] = v
+                d[f"{key}/{t}/{i:02d}"] = v
 
     experiment.log_metrics(d, step=global_step)
 
@@ -102,7 +102,7 @@ def log_grads(model: GSWrapper, global_step: int, experiment: Experiment) -> Non
                 d[f"{key}/{t}_norm"] = np.linalg.norm(data)
                 continue
             for i, v in enumerate(data):
-                d[f"{key}_{t}/{i:02d}"] = v
+                d[f"{key}/{t}/{i:02d}"] = v
 
     experiment.log_metrics(d, step=global_step)
 

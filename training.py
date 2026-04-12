@@ -82,7 +82,6 @@ def train(
                 ema.update(gs_wrapper.parameters())
 
                 if global_step % config.logging.log_weights_freq == 0:
-                    log_t_steps(res_d["timesteps"], global_step=global_step, experiment=experiment)
                     log_weights(model=gs_wrapper, global_step=global_step, experiment=experiment)
                     # In mixed-NFE AR mode, log timestep curves for all NFEs
                     nfe_list = getattr(config.dataset, 'steps_ratios', None)
@@ -93,6 +92,8 @@ def train(
                             global_step=global_step,
                             experiment=experiment,
                         )
+                    else:
+                        log_t_steps(res_d["timesteps"], global_step=global_step, experiment=experiment)
 
                 log_d["optim/grad_norm"] = grad_norm
                 log_d["optim/lr"] = optim.param_groups[0]["lr"]
