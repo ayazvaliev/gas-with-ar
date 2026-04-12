@@ -177,3 +177,5 @@ testing*
 all-configs/
 all-scripts/
 .vscode/
+
+*.txt

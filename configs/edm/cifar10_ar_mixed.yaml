@@ -18,8 +18,8 @@ dataset:
   # Mixed-NFE sampling: ratios for each student step count in a batch.
   # Keys are student NFEs, values are sampling weights (auto-normalised).
   steps_ratios:
-    4: 0.5
-    5: 0.5
+    "4": 0.5
+    "5": 0.5
 
 teacher_solver_config:
   steps: 20
@@ -51,7 +51,7 @@ student_solver_config:
     dropout: 0
 
 training:
-  n_iters: 10000
+  n_iters: 5000
   lr: 0.001
   iters_to_accumulate: 1
   # Alternatively, set effective_batch_size to derive iters_to_accumulate automatically:
