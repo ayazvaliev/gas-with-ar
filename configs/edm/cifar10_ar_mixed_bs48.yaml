@@ -5,23 +5,23 @@ model:
   type: EDM
   conditional: false
   t_eps: null
-  gradient_checkpointing: false
+  gradient_checkpointing: true
   guidance_scale: null
 
 dataset:
   teacher_pkl: data/teachers/edm/cifar10/dataset.pkl
   use_latents: false
   use_condition: false
-  train_size: null
-  batch_size: 24
+  train_size: 1400
+  batch_size: 48
   validation_batch_size: 128
   validation_size: 1000
   size_vis: 16
   num_workers: 0
 
 teacher_solver_config:
-  steps: 20 
-  order: 3 
+  steps: 20
+  order: 3
   time_type: logSNR
   variant: bh1
   t_eps: 0.0001
@@ -35,13 +35,20 @@ student_solver_config:
   use_theory_coef: true
   guidance_scale: null
 
+  # Mixed-NFE sampling: ratios for each student step count within a batch.
+  # Keys are student NFEs, values are sampling weights (auto-normalised).
+  # NFE is randomly assigned per sample at training time.
+  steps_ratios:
+    "4": 0.5
+    "5": 0.5
+
   loss_config:
     loss_type: null
     loss_key: loss_lpips
     disc_weight: 0.1
     disc_type: CIFAR10
     disc_lr: 0.00001
-  
+
   ar_config:
     d_model: 128
     dim_ff: 128
@@ -59,4 +66,4 @@ logging:
   eval_freq: 500
   checkpoint_freq: 500
   log_weights_freq: 10
-  run_name: ar_model_nfe_4
+  run_name: ar_mixed_nfe_4_5_bs48

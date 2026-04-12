@@ -5,6 +5,7 @@ model:
   type: EDM
   conditional: false
   t_eps: null
+  gradient_checkpointing: false
   guidance_scale: null
 
 dataset:

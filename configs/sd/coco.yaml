@@ -5,6 +5,7 @@ model:
   type: SD
   conditional: true
   t_eps: null
+  gradient_checkpointing: false
   guidance_scale: null
   prompts_path: data/coco_captions.txt 
   # Use coco_captions from https://github.com/vinhsuhi/LD3/blob/ec1bf603fb19696966ca30198ed209ae6488a3e5/data/coco_captions.txt

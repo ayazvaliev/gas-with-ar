@@ -39,7 +39,8 @@ class BaseModel:
         
         self.config = config
         self.model = self.load_model(self.config.path)
-        
+        self.use_gradient_checkpointing = getattr(config, 'gradient_checkpointing', False)
+
         assert self.config.t_eps is not None, "t epsilon is None"
         self.t_eps = self.config.t_eps
         self.setup_net_params()
@@ -212,6 +213,8 @@ class EDMModel(BaseModel):
         return ns, model_fn
 
     def forward(self, x: torch.Tensor, t: torch.Tensor, cond: Optional[torch.Tensor] = None) -> torch.Tensor:
+        if self.use_gradient_checkpointing:
+            return cp.checkpoint(self.model, x / self.s(t), self.sigma(t), use_reentrant=False)
         return self.model(x / self.s(t), self.sigma(t))
     
     
@@ -287,9 +290,11 @@ class LDMModel(BaseModel):
         return self.model.differentiable_decode_first_stage(latents)
     
     def forward(self, x: torch.Tensor, t: torch.Tensor, cond: Optional[torch.Tensor] = None) -> torch.Tensor:
+        if self.use_gradient_checkpointing:
+            return cp.checkpoint(self.model.apply_model, x, t.expand((x.shape[0])), cond, use_reentrant=False)
         return self.model.apply_model(x, t.expand((x.shape[0])), cond)
-    
-    
+
+
 class SDModel(LDMModel):
     def __init__(self, config: ConfigDict, device=torch.device('cuda')):
         super().__init__(config, device)
@@ -313,10 +318,3 @@ class SDModel(LDMModel):
         idxs = np.remainder(idxs, len(self.condition_loader))
         return list(self.condition_loader[idxs])
     
-    def forward(self, x: torch.Tensor, t: torch.Tensor, cond: Optional[torch.Tensor] = None) -> torch.Tensor:
-        output = cp.checkpoint(
-            self.model.apply_model, 
-            x, t.expand((x.shape[0])), cond, 
-            use_reentrant=False
-        )
-        return output
