@@ -15,11 +15,6 @@ from comet_ml import Experiment
 NOT_LOG_KEYS = ["timesteps", "x0_s", "x0_t", "latents_s"]
 
 
-def _is_per_sample(v, batch_size: int) -> bool:
-    """Return True if ``v`` is a per-sample tensor aligned with the batch."""
-    return isinstance(v, torch.Tensor) and v.shape[0] == batch_size
-
-
 @torch.no_grad()
 def evaluate_wrapper(
     gs_wrapper: GSWrapper,
@@ -31,65 +26,99 @@ def evaluate_wrapper(
 ) -> None:
     """Evaluate GS on the visualisation batch and test dataset.
 
-    In mixed-NFE (AR) mode, separately logs:
-    - A timestep plot per unique n_steps in vis_batch.
-    - A student-vs-teacher image grid per unique n_steps in vis_batch.
-    - Per-n_steps aggregate metrics computed on the full test dataset.
+    In AR mode (t_parametrization='ar_model' with steps_ratios), separately logs
+    timestep plots, image grids, and metrics for each NFE on the same test set.
     """
-    # ------------------------------------------------------------------ #
-    # Visualisation batch                                                  #
-    # ------------------------------------------------------------------ #
+    steps_ratios = getattr(gs_wrapper.solver_config, 'steps_ratios', None)
+    is_ar_mode = (
+        steps_ratios is not None
+        and gs_wrapper.solver_config.t_parametrization == "ar_model"
+    )
+
     vis_batch = [
         v.to(device) if isinstance(v, torch.Tensor) else v
         for v in data.vis_batch
     ]
-    n_steps_vis: Optional[torch.Tensor] = (
-        vis_batch[4] if len(vis_batch) == 5 and vis_batch[4] is not None else None
-    )
 
-    out_vis = gs_wrapper.forward(batch=vis_batch, return_timesteps=True, is_train=False)
-
-    # Ensure pixel-space images are available
-    if "x0_s" not in out_vis:
-        with torch.no_grad():
-            out_vis["x0_s"] = gs_wrapper.model.decode(out_vis["latents_s"])
-
-    is_ar_mode = (
-        n_steps_vis is not None
-        and gs_wrapper.solver_config.t_parametrization == "ar_model"
-    )
+    d_res = {}
 
     if is_ar_mode:
-        unique_steps = sorted(torch.unique(n_steps_vis).tolist())
+        nfe_list = sorted(int(k) for k in steps_ratios.keys())
 
-        for nfe in [int(n) for n in unique_steps]:
-            mask = (n_steps_vis == nfe).nonzero(as_tuple=True)[0]
+        # ------------------------------------------------------------------ #
+        # Visualisation batch — one pass per NFE                              #
+        # ------------------------------------------------------------------ #
+        for nfe in nfe_list:
+            out_vis = gs_wrapper.forward(
+                batch=vis_batch, return_timesteps=True, is_train=False, n_steps_override=nfe
+            )
+            if "x0_s" not in out_vis:
+                out_vis["x0_s"] = gs_wrapper.model.decode(out_vis["latents_s"])
 
-            # Timestep trajectory for this NFE
-            t_steps_nfe = gs_wrapper.get_timesteps_for_n(nfe)
             log_t_steps_plot(
-                t_steps=t_steps_nfe,
+                t_steps=out_vis["timesteps"],
                 global_step=global_step,
                 key=f"eval_image{suff}/t_steps_nfe{nfe}",
                 experiment=experiment,
             )
             log_t_steps(
-                t_steps=t_steps_nfe,
+                t_steps=out_vis["timesteps"],
                 global_step=global_step,
                 key=f"t_stats{suff}/nfe{nfe}",
                 experiment=experiment,
             )
-
-            # Student vs teacher images for this NFE
             log_end_img(
-                out_vis["x0_s"][mask],
-                out_vis["x0_t"][mask],
+                out_vis["x0_s"],
+                out_vis["x0_t"],
                 global_step=global_step,
                 key=f"vis_stat{suff}/backward_end_inter_nfe{nfe}",
                 experiment=experiment,
             )
+            for k, v in out_vis.items():
+                if k not in NOT_LOG_KEYS:
+                    d_res[f"vis_stat{suff}/nfe{nfe}/{k}"] = v.mean().item()
+
+        # ------------------------------------------------------------------ #
+        # Test dataset — one full pass per NFE                                #
+        # ------------------------------------------------------------------ #
+        for nfe in nfe_list:
+            log_d: dict = defaultdict(float)
+            num_elements = 0
+            out_test = None
+
+            for batch in data.test_loader:
+                batch = [v.to(device) if isinstance(v, torch.Tensor) else v for v in batch]
+                out_test = gs_wrapper.forward(
+                    batch=batch, return_timesteps=False, is_train=False, n_steps_override=nfe
+                )
+                bs = batch[0].shape[0]
+                num_elements += bs
+                for k, v in out_test.items():
+                    if k not in NOT_LOG_KEYS:
+                        log_d[k] += v.mean().item() * bs
+
+            for k, v in log_d.items():
+                d_res[f"val_stat{suff}/nfe{nfe}/{k}"] = v / num_elements
+
+            if out_test is not None:
+                if "x0_s" not in out_test:
+                    out_test["x0_s"] = gs_wrapper.model.decode(out_test["latents_s"])
+                log_end_img(
+                    out_test["x0_s"],
+                    out_test["x0_t"],
+                    global_step=global_step,
+                    key=f"val_stat{suff}/backward_end_inter_nfe{nfe}",
+                    experiment=experiment,
+                )
+
     else:
-        # Single-NFE: legacy behaviour
+        # ------------------------------------------------------------------ #
+        # Single-NFE (legacy)                                                 #
+        # ------------------------------------------------------------------ #
+        out_vis = gs_wrapper.forward(batch=vis_batch, return_timesteps=True, is_train=False)
+        if "x0_s" not in out_vis:
+            out_vis["x0_s"] = gs_wrapper.model.decode(out_vis["latents_s"])
+
         log_t_steps_plot(
             t_steps=out_vis["timesteps"],
             global_step=global_step,
@@ -103,93 +132,35 @@ def evaluate_wrapper(
             key=f"vis_stat{suff}/backward_end_inter",
             experiment=experiment,
         )
-
-    # Aggregate vis metrics
-    d_res = {}
-    for k, v in out_vis.items():
-        if k not in NOT_LOG_KEYS:
-            d_res[f"vis_stat/{k}{suff}"] = v.mean().item()
-
-    # ------------------------------------------------------------------ #
-    # Test dataset                                                         #
-    # ------------------------------------------------------------------ #
-    log_d: dict = defaultdict(float)                       # aggregate
-    per_nfe_d: dict = defaultdict(lambda: defaultdict(float))  # per-NFE
-    per_nfe_count: dict = defaultdict(int)
-    num_elements = 0
-
-    out_test = None  # keep last batch for image logging
-    n_steps_last: Optional[torch.Tensor] = None
-
-    for batch in data.test_loader:
-        batch = [v.to(device) if isinstance(v, torch.Tensor) else v for v in batch]
-        n_steps_batch: Optional[torch.Tensor] = (
-            batch[4] if len(batch) == 5 and batch[4] is not None else None
-        )
-
-        out_test = gs_wrapper.forward(batch=batch, return_timesteps=False, is_train=False)
-        bs = batch[0].shape[0]
-        num_elements += bs
-        n_steps_last = n_steps_batch
-
-        for k, v in out_test.items():
+        for k, v in out_vis.items():
             if k not in NOT_LOG_KEYS:
-                log_d[k] += v.mean().item() * bs
+                d_res[f"vis_stat/{k}{suff}"] = v.mean().item()
 
-        # Per-NFE accumulation
-        if (
-            n_steps_batch is not None
-            and gs_wrapper.solver_config.t_parametrization == "ar_model"
-        ):
-            for nfe in torch.unique(n_steps_batch).tolist():
-                nfe = int(nfe)
-                mask = (n_steps_batch == nfe).nonzero(as_tuple=True)[0]
-                count_n = len(mask)
-                per_nfe_count[nfe] += count_n
-                for k, v in out_test.items():
-                    if k not in NOT_LOG_KEYS and _is_per_sample(v, bs):
-                        per_nfe_d[nfe][k] += v[mask].mean().item() * count_n
+        log_d: dict = defaultdict(float)
+        num_elements = 0
+        out_test = None
 
-    # Aggregate test metrics
-    for k, v in log_d.items():
-        d_res[f"val_stat/{k}{suff}"] = v / num_elements
+        for batch in data.test_loader:
+            batch = [v.to(device) if isinstance(v, torch.Tensor) else v for v in batch]
+            out_test = gs_wrapper.forward(batch=batch, return_timesteps=False, is_train=False)
+            bs = batch[0].shape[0]
+            num_elements += bs
+            for k, v in out_test.items():
+                if k not in NOT_LOG_KEYS:
+                    log_d[k] += v.mean().item() * bs
 
-    # Per-NFE test metrics
-    for nfe, nfe_log in per_nfe_d.items():
-        for k, v in nfe_log.items():
-            d_res[f"val_stat_nfe{nfe}/{k}{suff}"] = v / per_nfe_count[nfe]
+        for k, v in log_d.items():
+            d_res[f"val_stat/{k}{suff}"] = v / num_elements
 
-    experiment.log_metrics(d_res, step=global_step)
-
-    # ------------------------------------------------------------------ #
-    # Test batch image logging (last batch)                               #
-    # ------------------------------------------------------------------ #
-    if out_test is None:
-        return
-
-    if "x0_s" not in out_test:
-        with torch.no_grad():
-            out_test["x0_s"] = gs_wrapper.model.decode(out_test["latents_s"])
-
-    if (
-        n_steps_last is not None
-        and gs_wrapper.solver_config.t_parametrization == "ar_model"
-    ):
-        for nfe in sorted(torch.unique(n_steps_last).tolist()):
-            nfe = int(nfe)
-            mask = (n_steps_last == nfe).nonzero(as_tuple=True)[0]
+        if out_test is not None:
+            if "x0_s" not in out_test:
+                out_test["x0_s"] = gs_wrapper.model.decode(out_test["latents_s"])
             log_end_img(
-                out_test["x0_s"][mask],
-                out_test["x0_t"][mask],
+                out_test["x0_s"],
+                out_test["x0_t"],
                 global_step=global_step,
-                key=f"val_stat{suff}/backward_end_inter_nfe{nfe}",
+                key=f"val_stat{suff}/backward_end_inter",
                 experiment=experiment,
             )
-    else:
-        log_end_img(
-            out_test["x0_s"],
-            out_test["x0_t"],
-            global_step=global_step,
-            key=f"val_stat{suff}/backward_end_inter",
-            experiment=experiment,
-        )
+
+    experiment.log_metrics(d_res, step=global_step)

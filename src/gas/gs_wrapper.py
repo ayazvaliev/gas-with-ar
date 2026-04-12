@@ -65,7 +65,6 @@ class GSWrapper(nn.Module):
 
         # init t steps
         self.eps_mu_offset = 1e-5
-        self._current_n_steps = self.steps  # used by get_time_steps for AR mode
         if self.solver_config.t_parametrization == "mu_logit":
             self.mu_logit = nn.Parameter(torch.ones(self.steps - 1), requires_grad=True)
             t_unif = torch.linspace(1., self.t_eps, self.steps + 1).flip(0)
@@ -78,11 +77,7 @@ class GSWrapper(nn.Module):
             use_ar = True
         else:
             raise NotImplementedError()
-        solver.get_time_steps = lambda **kwargs: self.get_t_steps(
-            use_ar=use_ar,
-            n_steps=self._current_n_steps,
-            **kwargs
-        )
+        solver.get_time_steps = lambda **kwargs: self.get_t_steps(use_ar=use_ar, **kwargs)
 
         # init t_couple
         self.t_couple = nn.Parameter(torch.zeros(self.steps), requires_grad=False)
@@ -125,7 +120,7 @@ class GSWrapper(nn.Module):
         """
         if kwargs.get("use_ar", False):
             n_steps = kwargs.get("n_steps", self.steps)
-            logits = self.ar_model(n_steps - 1)
+            logits = self.ar_model(int(n_steps) - 1)
         else:
             logits = self.mu_logit
         t = self.get_mu_t_steps(logits)
@@ -160,6 +155,7 @@ class GSWrapper(nn.Module):
 
         return t_steps.logit()
     
+    '''
     @torch.no_grad()
     def get_timesteps_for_n(self, n_steps: int) -> torch.Tensor:
         """Return solver timesteps for a specific n_steps value.
@@ -167,10 +163,8 @@ class GSWrapper(nn.Module):
         Only meaningful in AR mode (t_parametrization='ar_model').
         Falls back to the default self.steps in mu_logit mode.
         """
-        self._current_n_steps = n_steps
-        t = self.solver.get_time_steps()
-        self._current_n_steps = self.steps
-        return t
+        return self.solver.get_time_steps(n_steps=n_steps)
+    '''
 
     # utilities
     def load_checkpoint(self, checkpoint_path: str) -> None:
@@ -218,14 +212,7 @@ class GSWrapper(nn.Module):
             torch.tensor: Sampled images
         """
         steps = n_steps if n_steps is not None else self.steps
-        order = steps
-        self._current_n_steps = steps
-        images = self.solver.sample(
-            x=noise,
-            steps=steps,
-            order=order,
-        )
-        self._current_n_steps = self.steps  # reset to default
+        images = self.solver.sample(x=noise, steps=steps, order=steps)
         return None, images
 
     def _run_student_mixed_nfe(
@@ -254,41 +241,58 @@ class GSWrapper(nn.Module):
         )
         return all_student[restore_order]
 
+    def _sample_n_steps(self, batch_size: int, device: torch.device) -> torch.Tensor:
+        """Sample per-sample NFE assignments from solver_config.steps_ratios."""
+        steps_ratios = self.solver_config.steps_ratios
+        nfes = sorted(int(k) for k in steps_ratios.keys())
+        weights = torch.tensor(
+            [float(steps_ratios[str(n)]) for n in nfes], dtype=torch.float32
+        )
+        indices = torch.multinomial(weights, num_samples=batch_size, replacement=True)
+        return torch.tensor(nfes, dtype=torch.long)[indices].to(device)
+
     # training function
-    def forward(self, batch: SyntDataType, return_timesteps: bool = False, is_train: bool = True) -> dict:
+    def forward(
+        self,
+        batch: SyntDataType,
+        return_timesteps: bool = False,
+        is_train: bool = True,
+        n_steps_override: Optional[int] = None,
+    ) -> dict:
         """Forward function used in training loop. Evaluates solver and calculates losses.
 
         Args:
-            batch (SyntDataType): Dataset tuple of size 4 or 5.
-                Elements: noise, images, latents (optional), conditions (optional),
-                and optionally n_steps per sample (torch.LongTensor).
-                When n_steps is provided and t_parametrization is 'ar_model', the
-                student is run separately for each unique step count in the batch.
-            return_timesteps (bool): Flag whether to return timestep of the current step.
+            batch (SyntDataType): Dataset tuple (noise, images, latents, condition).
+            return_timesteps (bool): Flag whether to return timesteps of the current step.
             is_train (bool): Flag whether forward is called in the train loop.
-                Used in `discriminator_step` method of an DistAdversarialTraining instance.
+            n_steps_override (int, optional): Fix all samples to this NFE (used in
+                evaluation to assess a specific step count on the full test set).
 
         Returns:
             dict: Dictionary of all losses and model outputs.
                 Has `loss_total` key as a weighted sum of adversarial and distillation losses.
         """
-        assert len(batch) in (4, 5), f"len(batch) is expected to be 4 or 5, yours is {len(batch)}"
-        n_steps_batch = batch[4] if len(batch) == 5 else None
         noise, images = batch[0], batch[1]
 
+        steps_ratios = getattr(self.solver_config, 'steps_ratios', None)
         use_mixed_nfe = (
-            n_steps_batch is not None
+            steps_ratios is not None
             and self.solver_config.t_parametrization == "ar_model"
         )
 
         d = {}
         if return_timesteps:
-            first_n = n_steps_batch[0].item() if use_mixed_nfe else self.steps
-            self._current_n_steps = first_n
-            d['timesteps'] = self.solver.get_time_steps()
-            self._current_n_steps = self.steps
+            nfe_for_log = n_steps_override if n_steps_override is not None else self.steps
+            d['timesteps'] = self.solver.get_time_steps(n_steps=nfe_for_log)
 
         if use_mixed_nfe:
+            if n_steps_override is not None:
+                n_steps_batch = torch.full(
+                    (noise.shape[0],), n_steps_override,
+                    dtype=torch.long, device=noise.device,
+                )
+            else:
+                n_steps_batch = self._sample_n_steps(noise.shape[0], noise.device)
             student_images = self._run_student_mixed_nfe(noise, n_steps_batch)
         else:
             _, student_images = self.student_sampler_fn(noise)
@@ -367,14 +371,7 @@ class GSWrapperLatent(GSWrapper):
             self.model.set_condition(condition)
 
         steps = n_steps if n_steps is not None else self.steps
-        order = steps
-        self._current_n_steps = steps
-        latents = self.solver.sample(
-            x=noise,
-            steps=steps,
-            order=order,
-        )
-        self._current_n_steps = self.steps  # reset
+        latents = self.solver.sample(x=noise, steps=steps, order=steps)
 
         if decode:
             images = self.model.decode(latents)
@@ -410,24 +407,34 @@ class GSWrapperLatent(GSWrapper):
         )
         return all_latents[restore_order]
 
-    def forward(self, batch: SyntDataType, return_timesteps: bool = False, is_train: bool = True) -> dict:
-        assert len(batch) in (4, 5), f"len(batch) is expected to be 4 or 5, yours is {len(batch)}"
-        n_steps_batch = batch[4] if len(batch) == 5 else None
+    def forward(
+        self,
+        batch: SyntDataType,
+        return_timesteps: bool = False,
+        is_train: bool = True,
+        n_steps_override: Optional[int] = None,
+    ) -> dict:
         noise, images, latents, condition = batch[0], batch[1], batch[2], batch[3]
 
+        steps_ratios = getattr(self.solver_config, 'steps_ratios', None)
         use_mixed_nfe = (
-            n_steps_batch is not None
+            steps_ratios is not None
             and self.solver_config.t_parametrization == "ar_model"
         )
 
         d = {}
         if return_timesteps:
-            first_n = n_steps_batch[0].item() if use_mixed_nfe else self.steps
-            self._current_n_steps = first_n
-            d['timesteps'] = self.solver.get_time_steps()
-            self._current_n_steps = self.steps
+            nfe_for_log = n_steps_override if n_steps_override is not None else self.steps
+            d['timesteps'] = self.solver.get_time_steps(n_steps=nfe_for_log)
 
         if use_mixed_nfe:
+            if n_steps_override is not None:
+                n_steps_batch = torch.full(
+                    (noise.shape[0],), n_steps_override,
+                    dtype=torch.long, device=noise.device,
+                )
+            else:
+                n_steps_batch = self._sample_n_steps(noise.shape[0], noise.device)
             student_latents = self._run_student_mixed_nfe(noise, n_steps_batch, condition=condition)
         else:
             student_latents, _ = self.student_sampler_fn(

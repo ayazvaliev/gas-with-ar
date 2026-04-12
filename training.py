@@ -84,7 +84,7 @@ def train(
                 if global_step % config.logging.log_weights_freq == 0:
                     log_weights(model=gs_wrapper, global_step=global_step, experiment=experiment)
                     # In mixed-NFE AR mode, log timestep curves for all NFEs
-                    nfe_list = getattr(config.dataset, 'steps_ratios', None)
+                    nfe_list = getattr(config.student_solver_config, 'steps_ratios', None)
                     if nfe_list and hasattr(gs_wrapper, 'ar_model'):
                         log_multi_nfe_t_steps(
                             gs_wrapper=gs_wrapper,

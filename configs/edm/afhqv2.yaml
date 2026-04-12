@@ -1,3 +1,5 @@
+seed: 42
+
 model:
   path: pretrained/edm/edm-afhqv2-64x64-uncond-vp.pkl
   type: EDM

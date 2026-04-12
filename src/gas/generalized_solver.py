@@ -375,7 +375,7 @@ class GeneralizedSolver:
         self.params_step = 0
 
         # Init the initial values.
-        timesteps = self.get_time_steps()
+        timesteps = self.get_time_steps(n_steps=steps)
         assert timesteps.shape[0] - 1 == steps, f"timestep.shape = {timesteps.shape}"
         t = timesteps[0]
         t_prev_list = [t]

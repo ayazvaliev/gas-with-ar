@@ -1,3 +1,5 @@
+seed: 42
+
 model:
   path: pretrained/edm/edm-cifar10-32x32-uncond-vp.pkl
   type: EDM
@@ -6,20 +8,15 @@ model:
   guidance_scale: null
 
 dataset:
-  teacher_pkl: data/teachers/edm/cifar10/mixed_nfe_dataset.pkl
+  teacher_pkl: data/teachers/edm/cifar10/teacher_dataset.pkl
   use_latents: false
   use_condition: false
-  train_size: null
+  train_size: 1400
   batch_size: 24
   validation_batch_size: 128
   validation_size: 1000
   size_vis: 16
   num_workers: 0
-  # Mixed-NFE sampling: ratios for each student step count in a batch.
-  # Keys are student NFEs, values are sampling weights (auto-normalised).
-  steps_ratios:
-    "4": 0.5
-    "5": 0.5
 
 teacher_solver_config:
   steps: 20
@@ -36,6 +33,13 @@ student_solver_config:
   t_parametrization: ar_model
   use_theory_coef: true
   guidance_scale: null
+
+  # Mixed-NFE sampling: ratios for each student step count within a batch.
+  # Keys are student NFEs, values are sampling weights (auto-normalised).
+  # NFE is randomly assigned per sample at training time.
+  steps_ratios:
+    "4": 0.5
+    "5": 0.5
 
   loss_config:
     loss_type: null
@@ -54,8 +58,6 @@ training:
   n_iters: 5000
   lr: 0.001
   iters_to_accumulate: 1
-  # Alternatively, set effective_batch_size to derive iters_to_accumulate automatically:
-  # effective_batch_size: 96
   ema_decay: 0.999
 
 logging:

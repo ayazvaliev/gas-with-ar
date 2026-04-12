@@ -72,9 +72,9 @@ def main(
     solver_config.loss_config.loss_type = loss_type
 
     # Determine steps: CLI arg takes priority; for mixed-NFE AR mode the
-    # steps can be left as null in the config (dataset provides n_steps per sample).
+    # steps can be left as null in the config (AR model generates varying NFEs at runtime).
     use_mixed_nfe = (
-        getattr(dataset_config, 'steps_ratios', None) is not None
+        getattr(solver_config, 'steps_ratios', None) is not None
         and solver_config.t_parametrization == "ar_model"
     )
     if student_step is not None:
@@ -86,7 +86,7 @@ def main(
         # fixed-size parameters (t_couple, c_diff, a_diff) to at least the
         # maximum step count that will be used during training.
         if solver_config.steps is None:
-            max_nfe = max(int(k) for k in dataset_config.steps_ratios.keys())
+            max_nfe = max(int(k) for k in solver_config.steps_ratios.keys())
             solver_config.steps = max_nfe
             solver_config.order = max_nfe
         else:
@@ -95,7 +95,7 @@ def main(
     else:
         raise click.UsageError(
             "--student_step is required when not using mixed-NFE AR training "
-            "(i.e. when dataset.steps_ratios is not set or t_parametrization != 'ar_model')."
+            "(i.e. when student_solver_config.steps_ratios is not set or t_parametrization != 'ar_model')."
         )
 
     solver_config.student_name = "_".join(
@@ -107,8 +107,8 @@ def main(
         )
 
     # Setup dataset
-    set_global_seed(42)
-    data = SyntDataLoaders(dataset_config)
+    set_global_seed(config.seed)
+    data = SyntDataLoaders(dataset_config, seed=config.seed)
 
     # Setup model
     model_config = config.model

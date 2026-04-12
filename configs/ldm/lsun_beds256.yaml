@@ -1,3 +1,5 @@
+seed: 42
+
 model:
   path: configs/ldm/model_lsun_beds256.yaml
   type: LDM
