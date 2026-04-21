@@ -65,7 +65,8 @@ class ARModel(nn.Module):
         self.mlp = nn.Linear(ar_config.d_model, 1)
 
     def forward(self, num_steps: int):
-        pos_encodings = self.pe(num_steps)
+        device = next(self.parameters()).device
+        pos_encodings = self.pe(num_steps, device=device)
         pos_encodings_scale, pos_encodings_bias = torch.chunk(pos_encodings, 2, dim=-1)
         embeds = self.init_embedding * pos_encodings_scale[:1] + pos_encodings_bias[:1]
         for i in range(1, num_steps):

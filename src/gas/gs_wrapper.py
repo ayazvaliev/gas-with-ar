@@ -185,15 +185,16 @@ class GSWrapper(nn.Module):
         steps_ratios = getattr(self.solver_config, 'steps_ratios', None)
         nfe_list = sorted(int(k) for k in steps_ratios.keys()) if steps_ratios is not None else [self.steps]
 
-        device = next(self.ar_model.parameters()).device
+        warmup_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.ar_model.to(warmup_device)
         targets = {
-            nfe: torch.linspace(1.0, self.t_eps, nfe + 1)[1:-1].to(device)
+            nfe: torch.linspace(1.0, self.t_eps, nfe + 1)[1:-1].to(warmup_device)
             for nfe in nfe_list
         }
 
         optim = torch.optim.Adam(self.ar_model.parameters(), lr=lr)
 
-        print(f"\nAR warmup started: {n_iters} iters, lr={lr}, NFEs={nfe_list}")
+        print(f"\nAR warmup started: {n_iters} iters, lr={lr}, NFEs={nfe_list}, device={warmup_device}")
         pbar = tqdm(range(n_iters), desc="AR warmup", dynamic_ncols=True)
         final_loss = 0.0
 
@@ -210,6 +211,7 @@ class GSWrapper(nn.Module):
             pbar.set_postfix(loss=f"{total_loss:.6f}")
 
         print(f"AR warmup done. Final loss: {final_loss:.6f}\n")
+        self.ar_model.to("cpu")
 
     def load_checkpoint(self, checkpoint_path: str) -> None:
         """Loads EMA parameters checkpoint."""
