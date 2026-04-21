@@ -185,8 +185,9 @@ class GSWrapper(nn.Module):
         steps_ratios = getattr(self.solver_config, 'steps_ratios', None)
         nfe_list = sorted(int(k) for k in steps_ratios.keys()) if steps_ratios is not None else [self.steps]
 
+        device = next(self.ar_model.parameters()).device
         targets = {
-            nfe: torch.linspace(1.0, self.t_eps, nfe + 1).flip(0)[1:-1]
+            nfe: torch.linspace(1.0, self.t_eps, nfe + 1)[1:-1].to(device)
             for nfe in nfe_list
         }
 
