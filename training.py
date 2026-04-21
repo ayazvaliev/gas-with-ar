@@ -93,7 +93,7 @@ def train(
                             experiment=experiment,
                         )
                     else:
-                        log_t_steps(res_d["timesteps"], global_step=global_step, experiment=experiment)
+                        log_t_steps(res_d["timesteps"], global_step=global_step, experiment=experiment, key=f"t_stats/nfe{gs_wrapper.steps}")
 
                 log_d["optim/grad_norm"] = grad_norm
                 log_d["optim/lr"] = optim.param_groups[0]["lr"]
@@ -113,7 +113,7 @@ def train(
                     res_d["x0_s"],
                     res_d["x0_t"],
                     global_step=global_step,
-                    key="train/backward_end_inter",
+                    key=f"train/backward_end_inter_nfe{gs_wrapper.steps}",
                     experiment=experiment
                 )
 

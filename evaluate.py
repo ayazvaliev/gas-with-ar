@@ -115,6 +115,7 @@ def evaluate_wrapper(
         # ------------------------------------------------------------------ #
         # Single-NFE (legacy)                                                 #
         # ------------------------------------------------------------------ #
+        nfe = gs_wrapper.steps
         out_vis = gs_wrapper.forward(batch=vis_batch, return_timesteps=True, is_train=False)
         if "x0_s" not in out_vis:
             out_vis["x0_s"] = gs_wrapper.model.decode(out_vis["latents_s"])
@@ -122,19 +123,25 @@ def evaluate_wrapper(
         log_t_steps_plot(
             t_steps=out_vis["timesteps"],
             global_step=global_step,
-            key=f"eval_image{suff}/t_steps",
+            key=f"eval_image{suff}/t_steps_nfe{nfe}",
+            experiment=experiment,
+        )
+        log_t_steps(
+            t_steps=out_vis["timesteps"],
+            global_step=global_step,
+            key=f"t_stats{suff}/nfe{nfe}",
             experiment=experiment,
         )
         log_end_img(
             out_vis["x0_s"],
             out_vis["x0_t"],
             global_step=global_step,
-            key=f"vis_stat{suff}/backward_end_inter",
+            key=f"vis_stat{suff}/backward_end_inter_nfe{nfe}",
             experiment=experiment,
         )
         for k, v in out_vis.items():
             if k not in NOT_LOG_KEYS:
-                d_res[f"vis_stat/{k}{suff}"] = v.mean().item()
+                d_res[f"vis_stat{suff}/nfe{nfe}/{k}"] = v.mean().item()
 
         log_d: dict = defaultdict(float)
         num_elements = 0
@@ -150,7 +157,7 @@ def evaluate_wrapper(
                     log_d[k] += v.mean().item() * bs
 
         for k, v in log_d.items():
-            d_res[f"val_stat/{k}{suff}"] = v / num_elements
+            d_res[f"val_stat{suff}/nfe{nfe}/{k}"] = v / num_elements
 
         if out_test is not None:
             if "x0_s" not in out_test:
@@ -159,7 +166,7 @@ def evaluate_wrapper(
                 out_test["x0_s"],
                 out_test["x0_t"],
                 global_step=global_step,
-                key=f"val_stat{suff}/backward_end_inter",
+                key=f"val_stat{suff}/backward_end_inter_nfe{nfe}",
                 experiment=experiment,
             )
 
