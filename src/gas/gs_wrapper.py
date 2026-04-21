@@ -1,11 +1,12 @@
 import lpips
-
 import torch
+import torch.nn.functional as F
 from torch import nn
 from typing import Tuple, Optional, Any, List
 from torch.nn.functional import interpolate
 from torch_ema import ExponentialMovingAverage
 from ml_collections import ConfigDict
+from tqdm import tqdm
 
 from src.gas.base_model import BaseModel
 from src.gas.generalized_solver import GeneralizedSolver
@@ -75,6 +76,9 @@ class GSWrapper(nn.Module):
             self.ar_model = ARModel(solver_config.ar_config)
             self.act = lambda x: 0.5 * (torch.nn.functional.softsign(x) + 1)
             use_ar = True
+            ar_warmup_cfg = getattr(self.solver_config, 'ar_warmup', None)
+            if ar_warmup_cfg is not None and getattr(ar_warmup_cfg, 'enabled', False):
+                self._run_ar_warmup()
         else:
             raise NotImplementedError()
         solver.get_time_steps = lambda **kwargs: self.get_t_steps(use_ar=use_ar, **kwargs)
@@ -167,6 +171,45 @@ class GSWrapper(nn.Module):
     '''
 
     # utilities
+    def _run_ar_warmup(self) -> None:
+        """Pre-train AR model weights so initial timesteps approximate uniform spacing.
+
+        For each NFE, the target is the interior points of a uniform grid over
+        [t_eps, 1.0]. In mixed-NFE mode, gradients from all NFEs are accumulated
+        before each optimizer step so the model learns all step counts jointly.
+        """
+        warmup_cfg = self.solver_config.ar_warmup
+        n_iters = warmup_cfg.n_iters
+        lr = warmup_cfg.lr
+
+        steps_ratios = getattr(self.solver_config, 'steps_ratios', None)
+        nfe_list = sorted(int(k) for k in steps_ratios.keys()) if steps_ratios is not None else [self.steps]
+
+        targets = {
+            nfe: torch.linspace(1.0, self.t_eps, nfe + 1).flip(0)[1:-1]
+            for nfe in nfe_list
+        }
+
+        optim = torch.optim.Adam(self.ar_model.parameters(), lr=lr)
+
+        print(f"\nAR warmup started: {n_iters} iters, lr={lr}, NFEs={nfe_list}")
+        pbar = tqdm(range(n_iters), desc="AR warmup", dynamic_ncols=True)
+        final_loss = 0.0
+
+        for _ in pbar:
+            optim.zero_grad()
+            total_loss = 0.0
+            for nfe in nfe_list:
+                t = self.get_t_steps(use_ar=True, n_steps=nfe)
+                loss = F.mse_loss(t[1:-1], targets[nfe])
+                loss.backward()
+                total_loss += loss.item()
+            optim.step()
+            final_loss = total_loss
+            pbar.set_postfix(loss=f"{total_loss:.6f}")
+
+        print(f"AR warmup done. Final loss: {final_loss:.6f}\n")
+
     def load_checkpoint(self, checkpoint_path: str) -> None:
         """Loads EMA parameters checkpoint."""
         checkpoint = torch.load(checkpoint_path, map_location='cpu')
