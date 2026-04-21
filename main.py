@@ -96,13 +96,14 @@ def main(
             max_nfe = max(int(k) for k in solver_config.steps_ratios.keys())
             solver_config.steps = max_nfe
         if not ar_learn_correctors:
-            # derive order from steps (standard behaviour)
             solver_config.order = solver_config.steps
         # else: order must be set explicitly in config (asserted in GSWrapper)
+    elif solver_config.steps is not None:
+        if not ar_learn_correctors:
+            solver_config.order = solver_config.steps
     else:
         raise click.UsageError(
-            "--student_step is required when not using mixed-NFE AR training "
-            "(i.e. when student_solver_config.steps_ratios is not set or t_parametrization != 'ar_model')."
+            "--student_step is required when student_solver_config.steps is not set in config."
         )
 
     solver_config.student_name = "_".join(

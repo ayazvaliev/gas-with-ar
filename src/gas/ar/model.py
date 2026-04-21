@@ -59,10 +59,21 @@ class ARModel(nn.Module):
         super().__init__()
 
         self.config = ar_config
+        self.learn_correctors = getattr(ar_config, 'learn_correctors', False)
+        self.corrector_order = getattr(ar_config, 'corrector_order', 1)
+
+        out_dim = 1 + 2 * self.corrector_order if self.learn_correctors else 1
+
         self.init_embedding = nn.Parameter(torch.randn(1, ar_config.d_model) * sqrt(0.02), requires_grad=True)
         self.pe = LearnedLengthAwarePE(self.config)
         self.decoder = IncrementalDecoderLayer(self.config)
-        self.mlp = nn.Linear(ar_config.d_model, 1)
+        self.mlp = nn.Linear(ar_config.d_model, out_dim)
+
+        # Zero-init corrector output rows so correctors start at 0.0 (matching mu_logit default)
+        if self.learn_correctors:
+            with torch.no_grad():
+                self.mlp.weight[1:].zero_()
+                self.mlp.bias[1:].zero_()
 
     def forward(self, num_steps: int):
         device = next(self.parameters()).device
@@ -73,4 +84,7 @@ class ARModel(nn.Module):
             new_embed = self.decoder(embeds) * pos_encodings_scale[i:i+1] + pos_encodings_bias[i:i+1]
             embeds = torch.cat([embeds, new_embed], dim=0)
         # embeds [num_steps, d_model]
-        return self.mlp(embeds).squeeze(-1) # [num_steps,]
+        out = self.mlp(embeds)  # [num_steps, out_dim]
+        if not self.learn_correctors:
+            return out.squeeze(-1)  # [num_steps,]
+        return out  # [num_steps, 1 + 2*corrector_order]

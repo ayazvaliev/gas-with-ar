@@ -63,6 +63,7 @@ class GSWrapper(nn.Module):
         solver = self.get_base_solver()
         self.steps = self.solver_config.steps
         self.order = self.solver_config.order
+        self.learn_correctors = getattr(self.solver_config, 'learn_correctors', False)
 
         # init t steps
         self.eps_mu_offset = 1e-5
@@ -73,7 +74,15 @@ class GSWrapper(nn.Module):
             self.act = torch.nn.functional.sigmoid
             use_ar = False
         elif self.solver_config.t_parametrization == "ar_model":
-            self.ar_model = ARModel(solver_config.ar_config)
+            if self.learn_correctors:
+                assert self.order is not None, (
+                    "solver_config.order must be explicitly set to the solver order (e.g. 3) "
+                    "when learn_correctors=True with ar_model t_parametrization"
+                )
+            ar_config = solver_config.ar_config
+            ar_config.learn_correctors = self.learn_correctors
+            ar_config.corrector_order = self.order if self.learn_correctors else 1
+            self.ar_model = ARModel(ar_config)
             self.act = lambda x: 0.5 * (torch.nn.functional.softsign(x) + 1)
             use_ar = True
             ar_warmup_cfg = getattr(self.solver_config, 'ar_warmup', None)
@@ -88,15 +97,21 @@ class GSWrapper(nn.Module):
         solver.t_couple = self.t_couple
 
         # init coef
+        # mu_logit: requires_grad follows learn_correctors flag
+        # ar_model: always False here; solver attrs are overridden dynamically in get_t_steps
+        coef_requires_grad = (
+            self.learn_correctors
+            and self.solver_config.t_parametrization == "mu_logit"
+        )
         for i in range(1, self.order + 1):
             cname, aname = f'c{i}_diff', f'a{i}_diff'
 
             self.register_parameter(
-                param=nn.Parameter(torch.zeros(self.steps), requires_grad=False),
+                param=nn.Parameter(torch.zeros(self.steps), requires_grad=coef_requires_grad),
                 name=cname
             )
             self.register_parameter(
-                param=nn.Parameter(torch.zeros(self.steps), requires_grad=False),
+                param=nn.Parameter(torch.zeros(self.steps), requires_grad=coef_requires_grad),
                 name=aname
             )
 
@@ -121,10 +136,28 @@ class GSWrapper(nn.Module):
         When ``n_steps`` is supplied via kwargs (set by student_sampler_fn for
         mixed-NFE AR training), the AR model generates logits for that step
         count instead of the default ``self.steps``.
+
+        When ``learn_correctors`` is True and ``t_parametrization`` is ``ar_model``,
+        the AR model outputs ``1 + 2*order`` values per step. Corrector values are
+        extracted and set on the solver as side-effects before sampling begins.
+        AR outputs cover steps 0..n_steps-2; step n_steps-1 gets zero correctors.
         """
         if kwargs.get("use_ar", False):
             n_steps = kwargs.get("n_steps", self.steps)
-            logits = self.ar_model(int(n_steps) - 1)
+            ar_out = self.ar_model(int(n_steps) - 1)
+            if self.learn_correctors:
+                # ar_out: [n_steps-1, 1 + 2*order]
+                logits = ar_out[:, 0]
+                # self.solver may not exist yet during __init__ warmup; skip then
+                if hasattr(self, 'solver'):
+                    zero = torch.zeros(1, device=ar_out.device)
+                    for i in range(1, self.order + 1):
+                        a_vals = torch.cat([ar_out[:, i], zero])               # [n_steps]
+                        c_vals = torch.cat([ar_out[:, self.order + i], zero])  # [n_steps]
+                        setattr(self.solver, f'a{i}_diff', a_vals)
+                        setattr(self.solver, f'c{i}_diff', c_vals)
+            else:
+                logits = ar_out
         else:
             logits = self.mu_logit
         t = self.get_mu_t_steps(logits)
