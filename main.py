@@ -77,9 +77,16 @@ def main(
         getattr(solver_config, 'steps_ratios', None) is not None
         and solver_config.t_parametrization == "ar_model"
     )
+    # When learn_correctors=True with ar_model, order must be explicitly set in config
+    # to the solver order (e.g. 3); do not derive it from NFE count.
+    ar_learn_correctors = (
+        getattr(solver_config, 'learn_correctors', False)
+        and solver_config.t_parametrization == "ar_model"
+    )
     if student_step is not None:
         solver_config.steps = student_step
-        solver_config.order = student_step
+        if not ar_learn_correctors:
+            solver_config.order = student_step
     elif use_mixed_nfe:
         # In mixed-NFE mode the AR model handles varying step counts at runtime.
         # solver_config.steps must still be set so GSWrapper can size internal
@@ -88,10 +95,10 @@ def main(
         if solver_config.steps is None:
             max_nfe = max(int(k) for k in solver_config.steps_ratios.keys())
             solver_config.steps = max_nfe
-            solver_config.order = max_nfe
-        else:
-            # steps is already set in config; keep it as-is (user chose the max).
+        if not ar_learn_correctors:
+            # derive order from steps (standard behaviour)
             solver_config.order = solver_config.steps
+        # else: order must be set explicitly in config (asserted in GSWrapper)
     else:
         raise click.UsageError(
             "--student_step is required when not using mixed-NFE AR training "
