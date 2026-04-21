@@ -59,4 +59,4 @@ logging:
   eval_freq: 500
   checkpoint_freq: 500
   log_weights_freq: 10
-  run_name: ar_model_nfe_5
+  run_name: ar_model_nfe_6
