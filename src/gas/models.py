@@ -17,12 +17,12 @@ def load_base_model(config: ConfigDict, device=torch.device('cuda')) -> BaseMode
     raise NotImplementedError(f"unknown model type {config.type} was passed")
 
 
-def get_gs_wrapper(model: BaseModel, solver_config: ConfigDict) -> GSWrapper:
+def get_gs_wrapper(model: BaseModel, solver_config: ConfigDict, run_warmup: bool = True) -> GSWrapper:
     if model.config.type == 'EDM':
-        gs_wrapper = GSWrapper(model, solver_config)
+        gs_wrapper = GSWrapper(model, solver_config, run_warmup=run_warmup)
 
     elif model.config.type in ['LDM', 'SD']:
-        gs_wrapper = GSWrapperLatent(model, solver_config)
+        gs_wrapper = GSWrapperLatent(model, solver_config, run_warmup=run_warmup)
 
     else:
         raise NotImplementedError(f"unknown model type {model.config.type} was passed")

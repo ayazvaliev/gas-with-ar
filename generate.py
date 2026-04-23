@@ -170,14 +170,14 @@ def main(
     model = load_base_model(model_config, device)
 
     if is_multi_nfe:
-        gs_wrapper = get_gs_wrapper(model, solver_config)
+        gs_wrapper = get_gs_wrapper(model, solver_config, run_warmup=False)
         gs_wrapper.load_checkpoint(checkpoint_path=checkpoint_path)
     elif gs_solver:
         solver_config.loss_config.loss_type = "GS"
         if single_steps is not None:
             solver_config.steps = single_steps
         solver_config.order = solver_config.steps
-        gs_wrapper = get_gs_wrapper(model, solver_config)
+        gs_wrapper = get_gs_wrapper(model, solver_config, run_warmup=False)
         gs_wrapper.load_checkpoint(checkpoint_path=checkpoint_path)
         sampler_fn = partial(gs_wrapper.student_sampler_fn, decode=True)
     else:

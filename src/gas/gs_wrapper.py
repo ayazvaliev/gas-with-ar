@@ -33,16 +33,18 @@ class GSWrapper(nn.Module):
         adv_loss (DistAdversarialTraining): Adversarial training class instance. 
     """
     
-    def __init__(self, model: BaseModel, solver_config: ConfigDict):
+    def __init__(self, model: BaseModel, solver_config: ConfigDict, run_warmup: bool = True):
         """Initialize the Generalised Solver wrapper.
-    
+
         Args:
-            model (BaseModel): Instance of a BaseModel class. 
-                Its `decode`, `set_condition` methods and 
+            model (BaseModel): Instance of a BaseModel class.
+                Its `decode`, `set_condition` methods and
                 `model_fn`, `ns` and `t_eps` attributes are used.
             solver_config (ConfigDict): Solver configuration dictionary.
-                Must include steps, order, loss_config, 
+                Must include steps, order, loss_config,
                 t_parametrization and use_theory_coef.
+            run_warmup (bool): Whether to run AR warmup on init. Set to False
+                when a checkpoint will be loaded immediately after construction.
         """
         super().__init__()
         self.model = model
@@ -85,7 +87,7 @@ class GSWrapper(nn.Module):
             self.act = lambda x: 0.5 * (torch.nn.functional.softsign(x) + 1)
             use_ar = True
             ar_warmup_cfg = getattr(self.solver_config, 'ar_warmup', None)
-            if ar_warmup_cfg is not None and getattr(ar_warmup_cfg, 'enabled', False):
+            if run_warmup and ar_warmup_cfg is not None and getattr(ar_warmup_cfg, 'enabled', False):
                 self._run_ar_warmup()
         else:
             raise NotImplementedError()
@@ -445,8 +447,8 @@ class GSWrapper(nn.Module):
     
 class GSWrapperLatent(GSWrapper):
     """Generalised Solver wrapper adapted for latent models."""
-    def __init__(self, model: nn.Module, solver_config: ConfigDict):
-        super().__init__(model=model, solver_config=solver_config)
+    def __init__(self, model: nn.Module, solver_config: ConfigDict, run_warmup: bool = True):
+        super().__init__(model=model, solver_config=solver_config, run_warmup=run_warmup)
 
     def student_sampler_fn(
         self,
