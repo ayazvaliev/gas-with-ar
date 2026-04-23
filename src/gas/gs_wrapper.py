@@ -280,7 +280,7 @@ class GSWrapper(nn.Module):
     @property
     def loss_fn_vgg(self):
         if self._loss_fn_vgg is None:
-            self._loss_fn_vgg = lpips.LPIPS(net='vgg').requires_grad_(False).eval()
+            self._loss_fn_vgg = lpips.LPIPS(net='vgg').requires_grad_(False).eval().to(self.model.device)
         return self._loss_fn_vgg
 
     def interpolate_lpips(self, x: torch.Tensor) -> torch.Tensor:
