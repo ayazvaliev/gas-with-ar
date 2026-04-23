@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from __future__ import annotations
 """
 Batch evaluation: scan checkpoints/, match each run to its config, generate
 images, compute FID, and print a summary table.
