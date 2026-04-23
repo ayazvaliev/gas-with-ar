@@ -69,4 +69,4 @@ logging:
   eval_freq: 500
   checkpoint_freq: 500
   log_weights_freq: 10
-  run_name: ar_mixed_nfe_4_6_8_priority_4
+  run_name: ar_mixed_nfe_4_5_6_7_8
