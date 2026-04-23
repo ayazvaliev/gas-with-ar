@@ -16,6 +16,7 @@ Usage examples:
       --seeds 50000-99999 --batch 1024
 """
 
+import json
 import os
 import re
 import sys
@@ -114,10 +115,14 @@ def _parse_fid(output: str) -> float | None:
 @click.option("--n_gpu", default=1, show_default=True,
               help="Number of GPUs for torchrun (fid.py).")
 @click.option("--skip_generate", is_flag=True, default=False,
-              help="Skip image generation if output dir already exists.")
+              help="Skip image generation if output dir already exists. "
+                   "Also skips FID evaluation for runs already present in --results_json.")
+@click.option("--results_json", default=None, type=str,
+              help="Path to JSON file for saving/loading FID results. "
+                   "Results are appended on each run.")
 def main(
     checkpoints_dir, configs_dir, fid_ref, outdir,
-    seeds, batch, steps_override, n_gpu, skip_generate,
+    seeds, batch, steps_override, n_gpu, skip_generate, results_json,
 ):
     # ------------------------------------------------------------------
     # 1. Parse all configs → {run_name: (config_path, solver_config)}
@@ -188,7 +193,16 @@ def main(
     # ------------------------------------------------------------------
     # 4. Generate images + compute FID/LPIPS
     # ------------------------------------------------------------------
-    results = []
+    # Load existing results from JSON (if provided) so we can skip already-done runs.
+    existing_results: list[dict] = []
+    existing_run_names: set[str] = set()
+    if results_json is not None and os.path.isfile(results_json):
+        with open(results_json) as f:
+            existing_results = json.load(f)
+        existing_run_names = {r["run_name"] for r in existing_results}
+        print(f"Loaded {len(existing_results)} existing result(s) from {results_json}.")
+
+    results = list(existing_results)
 
     for run_name, ckpt_dir, ckpt_path, config_path, solver_cfg in matched:
         ckpt_iter = Path(ckpt_path).stem          # e.g. "5000"
@@ -243,6 +257,10 @@ def main(
                 continue
 
         # ---- FID per NFE --------------------------------------------
+        if skip_generate and run_name in existing_run_names:
+            print(f"[skip] '{run_name}' already in {results_json} — skipping FID.")
+            continue
+
         for nfe in nfe_list:
             images_dir = (
                 os.path.join(exp_outdir, "images", str(nfe))
@@ -278,11 +296,20 @@ def main(
             ))
             print(f"  → NFE={nfe}  FID={fid_val}")
 
+            if results_json is not None:
+                os.makedirs(os.path.dirname(os.path.abspath(results_json)), exist_ok=True)
+                with open(results_json, "w") as f:
+                    json.dump(results, f, indent=2)
+                print(f"  [saved] {results_json}")
+
     # ------------------------------------------------------------------
     # 5. Summary table
     # ------------------------------------------------------------------
+    new_results = [r for r in results if r["run_name"] not in existing_run_names]
+    if not new_results:
+        print("\nNo new results collected.")
+
     if not results:
-        print("\nNo results collected.")
         return
 
     run_w  = max(len(r["run_name"]) for r in results)
@@ -304,6 +331,12 @@ def main(
         print(f"{r['run_name']:<{run_w}}  {r['ckpt_iter']:>{iter_w}}  {r['nfe']:>5}  {fid_s:>10}")
 
     print("=" * len(sep))
+
+    if results_json is not None:
+        os.makedirs(os.path.dirname(os.path.abspath(results_json)), exist_ok=True)
+        with open(results_json, "w") as f:
+            json.dump(results, f, indent=2)
+        print(f"\nResults saved to {results_json}.")
 
 
 if __name__ == "__main__":
