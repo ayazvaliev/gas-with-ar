@@ -49,9 +49,8 @@ class GSWrapper(nn.Module):
         self.solver_config = solver_config
         self.t_eps = self.model.t_eps
         
-        # create lpips
-        self.loss_fn_vgg = lpips.LPIPS(net='vgg').requires_grad_(False)
-        self.loss_fn_vgg.eval()
+        self._loss_fn_vgg = None
+        self._ar_out_cache: dict = {}
 
         # construct loss
         self.loss_config = self.solver_config.loss_config
@@ -129,6 +128,11 @@ class GSWrapper(nn.Module):
         # end init solver
         self.solver = solver
 
+    def train(self, mode: bool = True):
+        if mode:
+            self._ar_out_cache.clear()
+        return super().train(mode)
+
     # timesteps logic
     def get_t_steps(self, **kwargs) -> torch.Tensor:
         """Get generation timesteps.
@@ -141,10 +145,23 @@ class GSWrapper(nn.Module):
         the AR model outputs ``1 + 2*order`` values per step. Corrector values are
         extracted and set on the solver as side-effects before sampling begins.
         AR outputs cover steps 0..n_steps-2; step n_steps-1 gets zero correctors.
+
+        In eval mode (inference), AR model outputs are cached by n_steps to avoid
+        redundant forward passes across batches.
         """
         if kwargs.get("use_ar", False):
             n_steps = kwargs.get("n_steps", self.steps)
-            ar_out = self.ar_model(int(n_steps) - 1)
+
+            # Cache AR model output in eval mode: model is frozen, same n_steps
+            # always produces the same result, so skip the forward on cache hit.
+            use_cache = not self.training
+            if use_cache and n_steps in self._ar_out_cache:
+                ar_out = self._ar_out_cache[n_steps]
+            else:
+                ar_out = self.ar_model(int(n_steps) - 1)
+                if use_cache:
+                    self._ar_out_cache[n_steps] = ar_out
+
             if self.learn_correctors:
                 # ar_out: [n_steps-1, 1 + 2*order]
                 logits = ar_out[:, 0]
@@ -257,6 +274,12 @@ class GSWrapper(nn.Module):
     def parameters(self) -> List[nn.parameter.Parameter]:
         """Returns list of specified solver and wrapper parameters."""
         return list(p for p in super().parameters() if p.requires_grad)
+
+    @property
+    def loss_fn_vgg(self):
+        if self._loss_fn_vgg is None:
+            self._loss_fn_vgg = lpips.LPIPS(net='vgg').requires_grad_(False).eval()
+        return self._loss_fn_vgg
 
     def interpolate_lpips(self, x: torch.Tensor) -> torch.Tensor:
         """Utility function to resize images for LPIPS calculation."""
