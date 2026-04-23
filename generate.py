@@ -163,9 +163,6 @@ def main(
         solver_config.order = max_nfe
     else:
         single_steps = steps_list[0] if steps_list else None
-        assert (single_steps is None) != (
-            solver_config.steps is None
-        ), "Steps should be specified in one and only one of both generate script and solver config"
 
     # Load base model.
     model_config.t_eps = solver_config.t_eps
@@ -177,8 +174,9 @@ def main(
         gs_wrapper.load_checkpoint(checkpoint_path=checkpoint_path)
     elif gs_solver:
         solver_config.loss_config.loss_type = "GS"
-        solver_config.steps = single_steps
-        solver_config.order = single_steps
+        if single_steps is not None:
+            solver_config.steps = single_steps
+        solver_config.order = solver_config.steps
         gs_wrapper = get_gs_wrapper(model, solver_config)
         gs_wrapper.load_checkpoint(checkpoint_path=checkpoint_path)
         sampler_fn = partial(gs_wrapper.student_sampler_fn, decode=True)
