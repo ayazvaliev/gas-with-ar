@@ -85,7 +85,7 @@ def main(
     )
     if student_step is not None:
         solver_config.steps = student_step
-        if not ar_learn_correctors:
+        if solver_config.order is None:
             solver_config.order = student_step
     elif use_mixed_nfe:
         # In mixed-NFE mode the AR model handles varying step counts at runtime.
@@ -95,11 +95,11 @@ def main(
         if solver_config.steps is None:
             max_nfe = max(int(k) for k in solver_config.steps_ratios.keys())
             solver_config.steps = max_nfe
-        if not ar_learn_correctors:
+        if not ar_learn_correctors and solver_config.order is None:
             solver_config.order = solver_config.steps
         # else: order must be set explicitly in config (asserted in GSWrapper)
     elif solver_config.steps is not None:
-        if not ar_learn_correctors:
+        if not ar_learn_correctors and solver_config.order is None:
             solver_config.order = solver_config.steps
     else:
         raise click.UsageError(
