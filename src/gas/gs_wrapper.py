@@ -160,21 +160,22 @@ class GSWrapper(nn.Module):
             if use_cache and n_steps in self._ar_out_cache:
                 ar_out = self._ar_out_cache[n_steps]
             else:
-                ar_out = self.ar_model(int(n_steps) - 1)
+                # When learning correctors, generate one extra AR step so the
+                # last solver step also gets a learned corrector instead of zero.
+                ar_num_steps = int(n_steps) if self.learn_correctors else int(n_steps) - 1
+                ar_out = self.ar_model(ar_num_steps)
                 if use_cache:
                     self._ar_out_cache[n_steps] = ar_out
 
             if self.learn_correctors:
-                # ar_out: [n_steps-1, 1 + 2*order]
-                logits = ar_out[:, 0]
+                # ar_out: [n_steps, 1 + 2*order]
+                # first n_steps-1 rows supply timestep logits; all n_steps rows supply correctors
+                logits = ar_out[:-1, 0]
                 # self.solver may not exist yet during __init__ warmup; skip then
                 if hasattr(self, 'solver'):
-                    zero = torch.zeros(1, device=ar_out.device)
                     for i in range(1, self.order + 1):
-                        a_vals = torch.cat([ar_out[:, i], zero])               # [n_steps]
-                        c_vals = torch.cat([ar_out[:, self.order + i], zero])  # [n_steps]
-                        setattr(self.solver, f'a{i}_diff', a_vals)
-                        setattr(self.solver, f'c{i}_diff', c_vals)
+                        setattr(self.solver, f'a{i}_diff', ar_out[:, i])
+                        setattr(self.solver, f'c{i}_diff', ar_out[:, self.order + i])
             else:
                 logits = ar_out
         else:

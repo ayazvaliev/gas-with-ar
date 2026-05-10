@@ -92,6 +92,77 @@ def _parse_fid(output: str) -> float | None:
     return None
 
 
+def _print_table(results: list[dict]) -> None:
+    run_w  = max(len(r["run_name"]) for r in results)
+    run_w  = max(run_w, len("Run name"))
+    iter_w = max(len(r["ckpt_iter"]) for r in results)
+    iter_w = max(iter_w, len("Iter"))
+
+    total_w = run_w + iter_w + 5 + 5 + 10 + 12
+    sep     = "-" * total_w
+    hdr     = f"{'Run name':<{run_w}}  {'Iter':>{iter_w}}  {'NFE':>5}  {'FID':>10}"
+
+    print(f"\n\n{'='*total_w}")
+    print("EVALUATION RESULTS")
+    print("=" * total_w)
+
+    for nfe in sorted(set(r["nfe"] for r in results)):
+        group = [r for r in results if r["nfe"] == nfe]
+        # None FIDs sort last; otherwise descending (worst first)
+        group.sort(key=lambda r: (r["fid"] if r["fid"] is not None else float("inf")))
+
+        print(f"\n  NFE = {nfe}")
+        print(hdr)
+        print(sep)
+        for r in group:
+            fid_s = f"{r['fid']:.4f}" if r["fid"] is not None else "N/A"
+            print(f"{r['run_name']:<{run_w}}  {r['ckpt_iter']:>{iter_w}}  {r['nfe']:>5}  {fid_s:>10}")
+
+    print("\n" + "=" * total_w)
+
+
+def _log_to_comet(results: list[dict], project: str, workspace: str | None) -> None:
+    try:
+        import comet_ml
+    except ImportError:
+        print("[ERROR] comet_ml is not installed. Run: pip install comet-ml")
+        return
+
+    from datetime import datetime
+
+    kwargs = dict(project_name=project)
+    if workspace:
+        kwargs["workspace"] = workspace
+
+    experiment = comet_ml.Experiment(**kwargs)
+    experiment.set_name(datetime.now().strftime("fid_eval_%Y-%m-%d_%H-%M-%S"))
+
+    # One table per NFE group, sorted descending by FID (worst → best)
+    for nfe in sorted(set(r["nfe"] for r in results)):
+        group = [r for r in results if r["nfe"] == nfe]
+        group.sort(key=lambda r: (r["fid"] if r["fid"] is not None else float("inf")))
+        experiment.log_table(
+            f"fid_nfe{nfe}.csv",
+            tabular_data=[[r["run_name"], r["ckpt_iter"], r["nfe"], r["fid"]] for r in group],
+            headers=["run_name", "ckpt_iter", "nfe", "fid"],
+        )
+
+    for r in results:
+        if r["fid"] is None:
+            continue
+        experiment.log_metric(
+            f"fid_nfe{r['nfe']}",
+            r["fid"],
+            step=int(r["ckpt_iter"]),
+            epoch=None,
+        )
+        experiment.log_parameter(f"run_{r['run_name']}_nfe{r['nfe']}", r["fid"])
+
+    experiment.end()
+    print(f"\n[comet] Results logged to project '{project}'."
+          f"  URL: {experiment.url}")
+
+
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
@@ -110,8 +181,9 @@ def _parse_fid(output: str) -> float | None:
 @click.option("--batch", default=1024, show_default=True,
               help="Batch size for generate.py and FID computation.")
 @click.option("--steps", "steps_override", default=None, type=str,
-              help="Comma-separated NFE override applied to ALL runs. "
-                   "Required when a config has steps=null and no steps_ratios.")
+              help="Comma-separated NFE list applied only to AR-mode runs "
+                   "(t_parametrization=ar_model), overriding steps_ratios/steps from config. "
+                   "Non-AR runs always use their config's NFE list.")
 @click.option("--n_gpu", default=1, show_default=True,
               help="Number of GPUs for torchrun (fid.py).")
 @click.option("--skip_generate", is_flag=True, default=False,
@@ -120,9 +192,14 @@ def _parse_fid(output: str) -> float | None:
 @click.option("--results_json", default=None, type=str,
               help="Path to JSON file for saving/loading FID results. "
                    "Results are appended on each run.")
+@click.option("--comet_project", default=None,
+              help="CometML project name. When set, exports the results table to CometML.")
+@click.option("--comet_workspace", default=None,
+              help="CometML workspace (defaults to your personal workspace).")
 def main(
     checkpoints_dir, configs_dir, fid_ref, outdir,
     seeds, batch, steps_override, n_gpu, skip_generate, results_json,
+    comet_project, comet_workspace,
 ):
     # ------------------------------------------------------------------
     # 1. Parse all configs → {run_name: (config_path, solver_config)}
@@ -216,7 +293,8 @@ def main(
         print(f"{'='*72}")
 
         # Determine NFE list
-        if steps_override is not None:
+        is_ar = getattr(solver_cfg, "t_parametrization", None) == "ar_model"
+        if steps_override is not None and is_ar:
             nfe_list = [int(s.strip()) for s in steps_override.split(",")]
         else:
             nfe_list = _parse_nfe_list(solver_cfg)
@@ -227,10 +305,7 @@ def main(
                 )
                 continue
 
-        is_multi_nfe = (
-            getattr(solver_cfg, "t_parametrization", None) == "ar_model"
-            and len(nfe_list) > 1
-        )
+        is_multi_nfe = is_ar and len(nfe_list) > 1
         steps_str = ",".join(str(n) for n in nfe_list)
 
         # ---- generate ------------------------------------------------
@@ -312,31 +387,16 @@ def main(
     if not results:
         return
 
-    run_w  = max(len(r["run_name"]) for r in results)
-    run_w  = max(run_w, len("Run name"))
-    iter_w = max(len(r["ckpt_iter"]) for r in results)
-    iter_w = max(iter_w, len("Iter"))
-
-    sep = "-" * (run_w + iter_w + 5 + 5 + 10 + 12)
-    hdr = f"{'Run name':<{run_w}}  {'Iter':>{iter_w}}  {'NFE':>5}  {'FID':>10}"
-
-    print(f"\n\n{'='*len(sep)}")
-    print("EVALUATION RESULTS")
-    print("=" * len(sep))
-    print(hdr)
-    print(sep)
-
-    for r in results:
-        fid_s = f"{r['fid']:.4f}" if r["fid"] is not None else "N/A"
-        print(f"{r['run_name']:<{run_w}}  {r['ckpt_iter']:>{iter_w}}  {r['nfe']:>5}  {fid_s:>10}")
-
-    print("=" * len(sep))
+    _print_table(results)
 
     if results_json is not None:
         os.makedirs(os.path.dirname(os.path.abspath(results_json)), exist_ok=True)
         with open(results_json, "w") as f:
             json.dump(results, f, indent=2)
         print(f"\nResults saved to {results_json}.")
+
+    if comet_project:
+        _log_to_comet(results, comet_project, comet_workspace)
 
 
 if __name__ == "__main__":

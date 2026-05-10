@@ -39,8 +39,8 @@ student_solver_config:
   # Keys are student NFEs, values are sampling weights (auto-normalised).
   # NFE is randomly assigned per sample at training time.
   steps_ratios:
-    "4": 0.25
-    "6": 0.75
+    "4": 1
+    "6": 3
 
   loss_config:
     loss_type: null
