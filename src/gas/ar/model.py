@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from math import sqrt
+from typing import Optional, Tuple
 
 from ml_collections import ConfigDict
 
@@ -53,9 +54,9 @@ class IncrementalDecoderLayer(nn.Module):
     def forward(
         self,
         last_embed: torch.Tensor,
-        k_cache: torch.Tensor | None = None,
-        v_cache: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        k_cache: Optional[torch.Tensor] = None,
+        v_cache: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         last_embed : [1, d_model]   — the most recently appended embed (query source)
         k_cache    : [i, d_model]   — K projections for all previous embeds, or None
@@ -112,8 +113,8 @@ class ARModel(nn.Module):
 
         last_embed = self.init_embedding * pe_scale[:1] + pe_bias[:1]
         all_embeds = [last_embed]
-        k_cache: torch.Tensor | None = None
-        v_cache: torch.Tensor | None = None
+        k_cache: Optional[torch.Tensor] = None
+        v_cache: Optional[torch.Tensor] = None
 
         for i in range(1, num_steps):
             new_embed, k_cache, v_cache = self.decoder(last_embed, k_cache, v_cache)
