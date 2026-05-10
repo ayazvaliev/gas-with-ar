@@ -388,7 +388,8 @@ class GSWrapper(nn.Module):
         d = {}
         if return_timesteps:
             nfe_for_log = n_steps_override if n_steps_override is not None else self.steps
-            d['timesteps'] = self.solver.get_time_steps(n_steps=nfe_for_log)
+            with torch.no_grad():
+                d['timesteps'] = self.solver.get_time_steps(n_steps=nfe_for_log)
 
         if use_mixed_nfe:
             if n_steps_override is not None:
@@ -530,7 +531,8 @@ class GSWrapperLatent(GSWrapper):
         d = {}
         if return_timesteps:
             nfe_for_log = n_steps_override if n_steps_override is not None else self.steps
-            d['timesteps'] = self.solver.get_time_steps(n_steps=nfe_for_log)
+            with torch.no_grad():
+                d['timesteps'] = self.solver.get_time_steps(n_steps=nfe_for_log)
 
         if use_mixed_nfe:
             if n_steps_override is not None:
