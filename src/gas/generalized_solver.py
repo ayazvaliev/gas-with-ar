@@ -399,4 +399,4 @@ class GeneralizedSolver:
             t_prev_list = t_prev_list[-order:]
             model_prev_list = model_prev_list[-order:]
 
-        return x
+        return x, timesteps

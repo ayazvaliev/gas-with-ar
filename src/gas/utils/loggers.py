@@ -120,28 +120,27 @@ def log_t_steps(t_steps: torch.Tensor, global_step: int, experiment: Experiment,
 
 @torch.no_grad()
 def log_multi_nfe_t_steps(
-    gs_wrapper: GSWrapper,
+    timesteps_dict: Dict[int, torch.Tensor],
     nfe_list: List[int],
+    gs_wrapper: GSWrapper,
     global_step: int,
     experiment: Experiment,
     key_prefix: str = "t_stats",
 ) -> None:
-    """Log timestep trajectories for multiple NFE values (AR mode).
+    """Log timestep trajectories for all NFE values in nfe_list (AR mode).
 
-    For each NFE in ``nfe_list``, queries the AR model to get the predicted
-    timestep sequence and logs it both as a line plot and as individual scalar
-    metrics under ``<key_prefix>/nfe<N>/t_XX``.
+    Uses precomputed timesteps from the last training batch where available.
+    For any NFE absent from timesteps_dict (not sampled in that batch), falls
+    back to an explicit AR model query.
 
     Args:
-        gs_wrapper: Trained GSWrapper in AR mode.
-        nfe_list: List of student step counts to visualise.
+        timesteps_dict: Precomputed NFE → timestep tensor from the last batch.
+        nfe_list: All NFEs defined in the config (guarantees complete coverage).
+        gs_wrapper: Wrapper with AR model, used for fallback queries.
         global_step: Current training iteration.
         experiment: Active CometML experiment.
         key_prefix: Metric key prefix.
     """
-    if not hasattr(gs_wrapper, 'ar_model'):
-        return
-
     fig, ax = plt.subplots(1, 1, figsize=(6, 4))
     ax.set_xlabel("Step")
     ax.set_ylabel("Time")
@@ -149,7 +148,10 @@ def log_multi_nfe_t_steps(
 
     d: Dict[str, float] = {}
     for nfe in sorted(nfe_list):
-        t_steps = gs_wrapper.solver.get_time_steps(n_steps=nfe).detach().cpu().numpy()
+        if nfe in timesteps_dict:
+            t_steps = timesteps_dict[nfe].detach().cpu().numpy()
+        else:
+            t_steps = gs_wrapper.solver.get_time_steps(n_steps=nfe).detach().cpu().numpy()
         ax.plot(t_steps, label=f"NFE={nfe}")
         for i, t in enumerate(t_steps):
             d[f"{key_prefix}/nfe{nfe}/t_{i:02d}"] = float(t)

@@ -148,8 +148,9 @@ class GSWrapper(nn.Module):
         extracted and set on the solver as side-effects before sampling begins.
         AR outputs cover steps 0..n_steps-2; step n_steps-1 gets zero correctors.
 
-        In eval mode (inference), AR model outputs are cached by n_steps to avoid
-        redundant forward passes across batches.
+        In eval mode, AR model outputs are cached by n_steps to avoid redundant forward
+        passes across batches. Caching is disabled in train mode so each batch gets a
+        fresh AR forward pass with a live computation graph.
         """
         if kwargs.get("use_ar", False):
             n_steps = kwargs.get("n_steps", self.steps)
@@ -317,8 +318,8 @@ class GSWrapper(nn.Module):
             torch.tensor: Sampled images
         """
         steps = n_steps if n_steps is not None else self.steps
-        images = self.solver.sample(x=noise, steps=steps, order=steps)
-        return None, images
+        images, timesteps = self.solver.sample(x=noise, steps=steps, order=steps)
+        return None, images, timesteps
 
     def _run_student_mixed_nfe(
         self,
@@ -336,7 +337,7 @@ class GSWrapper(nn.Module):
 
         for n in unique_steps:
             mask = (n_steps_batch == n).nonzero(as_tuple=True)[0]
-            _, student_imgs_n = self.student_sampler_fn(noise[mask], n_steps=n.item())
+            _, student_imgs_n, _ = self.student_sampler_fn(noise[mask], n_steps=n.item())
             group_imgs.append(student_imgs_n)
             batch_order.extend(mask.tolist())
 
@@ -369,10 +370,11 @@ class GSWrapper(nn.Module):
         unique_steps = torch.unique(n_steps_batch)
         batch_order: List[int] = []
         d_groups: dict = {}
+        timesteps_dict: dict = {}
 
         if self.loss_config.loss_type == 'GAS':
             with torch.no_grad():
-                _, student_images_disc = self.student_sampler_fn(torch.randn_like(noise))
+                _, student_images_disc, _ = self.student_sampler_fn(torch.randn_like(noise))
             res_disc = self.adv_loss.discriminator_step(
                 FakeSamples=student_images_disc,
                 RealSamples=images,
@@ -389,7 +391,8 @@ class GSWrapper(nn.Module):
             group_size = len(mask)
             group_fraction = group_size / total_size
 
-            _, student_imgs_n = self.student_sampler_fn(noise[mask], n_steps=n.item())
+            _, student_imgs_n, t_steps_n = self.student_sampler_fn(noise[mask], n_steps=n.item())
+            timesteps_dict[n.item()] = t_steps_n.detach()
             teacher_imgs_n = images[mask]
 
             loss_l1_n = torch.abs(student_imgs_n - teacher_imgs_n).mean((1, 2, 3))
@@ -432,6 +435,7 @@ class GSWrapper(nn.Module):
         for k, parts in d_groups.items():
             d[k] = torch.cat(parts, dim=0)[restore_order]
 
+        d['timesteps'] = timesteps_dict
         d['loss_total'] = d[self.loss_config.loss_key]
         d['_gradients_accumulated'] = True
 
@@ -481,10 +485,6 @@ class GSWrapper(nn.Module):
         )
 
         d = {}
-        if return_timesteps:
-            nfe_for_log = n_steps_override if n_steps_override is not None else self.steps
-            with torch.no_grad():
-                d['timesteps'] = self.solver.get_time_steps(n_steps=nfe_for_log)
 
         if use_mixed_nfe:
             n_steps_batch = (
@@ -499,8 +499,14 @@ class GSWrapper(nn.Module):
                 return d
             else:
                 student_images = self._run_student_mixed_nfe(noise, n_steps_batch)
+                if return_timesteps:
+                    nfe_for_log = n_steps_override if n_steps_override is not None else self.steps
+                    with torch.no_grad():
+                        d['timesteps'] = self.solver.get_time_steps(n_steps=nfe_for_log)
         else:
-            _, student_images = self.student_sampler_fn(noise)
+            _, student_images, t_steps = self.student_sampler_fn(noise)
+            if return_timesteps:
+                d['timesteps'] = t_steps.detach()
 
         d['loss_l1'] = torch.abs(student_images - images).mean((1, 2, 3))
         d['loss_l2'] = torch.square(student_images - images).mean((1, 2, 3))
@@ -513,7 +519,7 @@ class GSWrapper(nn.Module):
         if self.loss_config.loss_type == 'GAS':
             # discriminator step
             with torch.no_grad():
-                _, student_images_disc = self.student_sampler_fn(
+                _, student_images_disc, _ = self.student_sampler_fn(
                     torch.randn_like(noise)
                 )
             res = self.adv_loss.discriminator_step(
@@ -576,12 +582,12 @@ class GSWrapperLatent(GSWrapper):
             self.model.set_condition(condition)
 
         steps = n_steps if n_steps is not None else self.steps
-        latents = self.solver.sample(x=noise, steps=steps, order=steps)
+        latents, timesteps = self.solver.sample(x=noise, steps=steps, order=steps)
 
         if decode:
             images = self.model.decode(latents)
 
-        return latents, images
+        return latents, images, timesteps
 
     def _run_student_mixed_nfe(
         self,
@@ -602,7 +608,7 @@ class GSWrapperLatent(GSWrapper):
                     cond_n = condition[mask]
                 else:
                     cond_n = [condition[i] for i in mask.tolist()]
-            latents_n, _ = self.student_sampler_fn(noise[mask], condition=cond_n, n_steps=n.item())
+            latents_n, _, _ = self.student_sampler_fn(noise[mask], condition=cond_n, n_steps=n.item())
             group_latents.append(latents_n)
             batch_order.extend(mask.tolist())
 
@@ -635,10 +641,11 @@ class GSWrapperLatent(GSWrapper):
         batch_order: List[int] = []
         group_latents: List[torch.Tensor] = []
         d_groups: dict = {}
+        timesteps_dict: dict = {}
 
         if self.loss_config.loss_type == 'GAS':
             with torch.no_grad():
-                student_latents_disc, _ = self.student_sampler_fn(torch.randn_like(noise))
+                student_latents_disc, _, _ = self.student_sampler_fn(torch.randn_like(noise))
             res_disc = self.adv_loss.discriminator_step(
                 FakeSamples=student_latents_disc,
                 RealSamples=latents,
@@ -662,7 +669,8 @@ class GSWrapperLatent(GSWrapper):
                 else:
                     cond_n = [condition[i] for i in mask.tolist()]
 
-            latents_n, _ = self.student_sampler_fn(noise[mask], condition=cond_n, n_steps=n.item())
+            latents_n, _, t_steps_n = self.student_sampler_fn(noise[mask], condition=cond_n, n_steps=n.item())
+            timesteps_dict[n.item()] = t_steps_n.detach()
             teacher_latents_n = latents[mask]
 
             loss_l1_n = torch.abs(teacher_latents_n - latents_n).mean((1, 2, 3))
@@ -703,6 +711,7 @@ class GSWrapperLatent(GSWrapper):
         for k, parts in d_groups.items():
             d[k] = torch.cat(parts, dim=0)[restore_order]
 
+        d['timesteps'] = timesteps_dict
         d['loss_total'] = d[self.loss_config.loss_key]
         d['x0_t'] = self.interpolate_lpips(images)
         d['latents_s'] = student_latents
@@ -725,10 +734,6 @@ class GSWrapperLatent(GSWrapper):
         )
 
         d = {}
-        if return_timesteps:
-            nfe_for_log = n_steps_override if n_steps_override is not None else self.steps
-            with torch.no_grad():
-                d['timesteps'] = self.solver.get_time_steps(n_steps=nfe_for_log)
 
         if use_mixed_nfe:
             n_steps_batch = (
@@ -744,11 +749,17 @@ class GSWrapperLatent(GSWrapper):
                 return d
             else:
                 student_latents = self._run_student_mixed_nfe(noise, n_steps_batch, condition=condition)
+                if return_timesteps:
+                    nfe_for_log = n_steps_override if n_steps_override is not None else self.steps
+                    with torch.no_grad():
+                        d['timesteps'] = self.solver.get_time_steps(n_steps=nfe_for_log)
         else:
-            student_latents, _ = self.student_sampler_fn(
+            student_latents, _, t_steps = self.student_sampler_fn(
                 noise,
                 condition=condition
             )
+            if return_timesteps:
+                d['timesteps'] = t_steps.detach()
 
         d['loss_l1_latents'] = torch.abs(latents - student_latents).mean((1, 2, 3))
         d['loss_l2_latents'] = torch.square(latents - student_latents).mean((1, 2, 3))
@@ -757,7 +768,7 @@ class GSWrapperLatent(GSWrapper):
 
         if self.loss_config.loss_type == "GAS":
             with torch.no_grad():
-                student_latents_disc, _ = self.student_sampler_fn(
+                student_latents_disc, _, _ = self.student_sampler_fn(
                     torch.randn_like(noise)
                 )
             res = self.adv_loss.discriminator_step(
