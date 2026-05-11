@@ -65,9 +65,11 @@ def train(
             t_start = time.time()
             batch = [v.to(device) if isinstance(v, torch.Tensor) else v for v in batch]
 
-            res_d = gs_wrapper.forward(batch=batch, return_timesteps=True)
+            res_d = gs_wrapper.forward(batch=batch, return_timesteps=True, grad_scale=1.0 / iters_to_accumulate)
+            gradients_accumulated = res_d.pop('_gradients_accumulated', False)
             loss = res_d["loss_total"].mean() / iters_to_accumulate
-            loss.backward()
+            if not gradients_accumulated:
+                loss.backward()
 
             log_d = {"optim/time": time.time() - t_start}
 

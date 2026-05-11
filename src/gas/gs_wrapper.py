@@ -325,10 +325,10 @@ class GSWrapper(nn.Module):
         noise: torch.Tensor,
         n_steps_batch: torch.Tensor,
     ) -> torch.Tensor:
-        """Run student sampler for a batch with per-sample n_steps.
+        """Run student sampler for a batch with per-sample n_steps (eval path).
 
         Samples within each unique n_steps group are processed together, then
-        reconstructed in the original batch order. Gradient flow is preserved.
+        reconstructed in the original batch order. No gradient accumulation.
         """
         unique_steps = torch.unique(n_steps_batch)
         batch_order: List[int] = []
@@ -345,6 +345,95 @@ class GSWrapper(nn.Module):
             torch.tensor(batch_order, device=noise.device)
         )
         return all_student[restore_order]
+
+    def _train_mixed_nfe_step(
+        self,
+        noise: torch.Tensor,
+        n_steps_batch: torch.Tensor,
+        images: torch.Tensor,
+        grad_scale: float,
+        is_train: bool,
+        d: dict,
+    ) -> None:
+        """Per-group forward + loss + backward for memory-efficient mixed-NFE training.
+
+        For each unique NFE group: run student sampler, compute all losses, call
+        backward scaled by (group_size / total_size * grad_scale), then detach.
+        Activations from each group are freed before the next group is processed.
+
+        Mutates d in-place with detached per-sample loss tensors for logging,
+        x0_s/x0_t for visualization (reused from the per-group LPIPS computation),
+        and _gradients_accumulated=True.
+        """
+        total_size = noise.shape[0]
+        unique_steps = torch.unique(n_steps_batch)
+        batch_order: List[int] = []
+        d_groups: dict = {}
+
+        if self.loss_config.loss_type == 'GAS':
+            with torch.no_grad():
+                _, student_images_disc = self.student_sampler_fn(torch.randn_like(noise))
+            res_disc = self.adv_loss.discriminator_step(
+                FakeSamples=student_images_disc,
+                RealSamples=images,
+                is_train=is_train,
+            )
+            d['dis_loss_adv'] = res_disc[0]
+            d['dis_scores_fake'] = res_disc[1]
+            d['dis_signs_fake'] = res_disc[1].sign()
+            d['dis_r1'] = res_disc[2]
+            d['dis_r2'] = res_disc[3]
+
+        for n in unique_steps:
+            mask = (n_steps_batch == n).nonzero(as_tuple=True)[0]
+            group_size = len(mask)
+            group_fraction = group_size / total_size
+
+            _, student_imgs_n = self.student_sampler_fn(noise[mask], n_steps=n.item())
+            teacher_imgs_n = images[mask]
+
+            loss_l1_n = torch.abs(student_imgs_n - teacher_imgs_n).mean((1, 2, 3))
+            loss_l2_n = torch.square(student_imgs_n - teacher_imgs_n).mean((1, 2, 3))
+            x0_s_n = self.interpolate_lpips(student_imgs_n)
+            x0_t_n = self.interpolate_lpips(teacher_imgs_n)
+            loss_lpips_n = self.loss_fn_vgg(x0_s_n, x0_t_n).flatten(0)
+
+            per_sample = {
+                'loss_l1': loss_l1_n,
+                'loss_l2': loss_l2_n,
+                'loss_lpips': loss_lpips_n,
+                'x0_s': x0_s_n,
+                'x0_t': x0_t_n,
+            }
+
+            if self.loss_config.loss_type == 'GAS':
+                loss_adv_n, gen_res = self.adv_loss.AccumulateGeneratorGradients(
+                    FakeSamples=student_imgs_n,
+                    RealSamples=teacher_imgs_n,
+                )
+                per_sample['gen_loss_adv'] = loss_adv_n
+                per_sample['gen_fake_gen'] = gen_res[1]
+                per_sample['gen_signs_fake'] = gen_res[1].sign()
+                loss_total_n = (
+                    self.loss_config.disc_weight * loss_adv_n
+                    + per_sample[self.loss_config.loss_key]
+                )
+            else:
+                loss_total_n = per_sample[self.loss_config.loss_key]
+
+            (loss_total_n.mean() * group_fraction * grad_scale).backward()
+
+            for k, v in per_sample.items():
+                d_groups.setdefault(k, []).append(v.detach())
+
+            batch_order.extend(mask.tolist())
+
+        restore_order = torch.argsort(torch.tensor(batch_order, device=noise.device))
+        for k, parts in d_groups.items():
+            d[k] = torch.cat(parts, dim=0)[restore_order]
+
+        d['loss_total'] = d[self.loss_config.loss_key]
+        d['_gradients_accumulated'] = True
 
     def _sample_n_steps(self, batch_size: int, device: torch.device) -> torch.Tensor:
         """Sample per-sample NFE assignments from solver_config.steps_ratios."""
@@ -363,6 +452,7 @@ class GSWrapper(nn.Module):
         return_timesteps: bool = False,
         is_train: bool = True,
         n_steps_override: Optional[int] = None,
+        grad_scale: float = 1.0,
     ) -> dict:
         """Forward function used in training loop. Evaluates solver and calculates losses.
 
@@ -372,10 +462,15 @@ class GSWrapper(nn.Module):
             is_train (bool): Flag whether forward is called in the train loop.
             n_steps_override (int, optional): Fix all samples to this NFE (used in
                 evaluation to assess a specific step count on the full test set).
+            grad_scale (float): Multiplier applied to each group's loss before backward.
+                Pass 1/iters_to_accumulate from the training loop so that per-group
+                gradients match the gradient-accumulation scaling used in the non-mixed path.
 
         Returns:
             dict: Dictionary of all losses and model outputs.
                 Has `loss_total` key as a weighted sum of adversarial and distillation losses.
+                In mixed-NFE training mode also has `_gradients_accumulated=True` to signal
+                that backward was already called inside forward.
         """
         noise, images = batch[0], batch[1]
 
@@ -392,14 +487,18 @@ class GSWrapper(nn.Module):
                 d['timesteps'] = self.solver.get_time_steps(n_steps=nfe_for_log)
 
         if use_mixed_nfe:
-            if n_steps_override is not None:
-                n_steps_batch = torch.full(
-                    (noise.shape[0],), n_steps_override,
-                    dtype=torch.long, device=noise.device,
-                )
+            n_steps_batch = (
+                torch.full((noise.shape[0],), n_steps_override, dtype=torch.long, device=noise.device)
+                if n_steps_override is not None
+                else self._sample_n_steps(noise.shape[0], noise.device)
+            )
+            if is_train:
+                # Per-group backward: avoids accumulating activations across all NFE groups.
+                # Gradients are fully accumulated by the time this returns.
+                self._train_mixed_nfe_step(noise, n_steps_batch, images, grad_scale, is_train, d)
+                return d
             else:
-                n_steps_batch = self._sample_n_steps(noise.shape[0], noise.device)
-            student_images = self._run_student_mixed_nfe(noise, n_steps_batch)
+                student_images = self._run_student_mixed_nfe(noise, n_steps_batch)
         else:
             _, student_images = self.student_sampler_fn(noise)
 
@@ -412,7 +511,7 @@ class GSWrapper(nn.Module):
         d['loss_lpips'] = self.loss_fn_vgg(d['x0_s'], d['x0_t']).flatten(0)
 
         if self.loss_config.loss_type == 'GAS':
-            # disctiminator step optim
+            # discriminator step
             with torch.no_grad():
                 _, student_images_disc = self.student_sampler_fn(
                     torch.randn_like(noise)
@@ -428,7 +527,7 @@ class GSWrapper(nn.Module):
             d['dis_r1'] = res[2]
             d['dis_r2'] = res[3]
 
-            # generator step optim
+            # generator step
             loss_adv, res = self.adv_loss.AccumulateGeneratorGradients(
                 FakeSamples=student_images,
                 RealSamples=images
@@ -438,7 +537,7 @@ class GSWrapper(nn.Module):
             d['gen_signs_fake'] = res[1].sign()
 
             assert d['gen_loss_adv'].shape == d[self.loss_config.loss_key].shape, f"""
-                Shape of generator loss is not equal to distillation loss shape. 
+                Shape of generator loss is not equal to distillation loss shape.
                 ({d['gen_loss_adv'].shape} vs {d[self.loss_config.loss_key].shape}).
             """
 
@@ -490,7 +589,7 @@ class GSWrapperLatent(GSWrapper):
         n_steps_batch: torch.Tensor,
         condition: Any = None,
     ) -> torch.Tensor:
-        """Run student sampler for a latent-model batch with per-sample n_steps."""
+        """Run student sampler for a latent-model batch with per-sample n_steps (eval path)."""
         unique_steps = torch.unique(n_steps_batch)
         batch_order: List[int] = []
         group_latents: List[torch.Tensor] = []
@@ -513,12 +612,109 @@ class GSWrapperLatent(GSWrapper):
         )
         return all_latents[restore_order]
 
+    def _train_mixed_nfe_latent_step(
+        self,
+        noise: torch.Tensor,
+        n_steps_batch: torch.Tensor,
+        latents: torch.Tensor,
+        images: torch.Tensor,
+        grad_scale: float,
+        is_train: bool,
+        condition: Any,
+        d: dict,
+    ) -> None:
+        """Per-group forward + loss + backward for memory-efficient mixed-NFE latent training.
+
+        Mirrors GSWrapper._train_mixed_nfe_step for the latent-space case: losses are
+        computed on latents, x0_t is set from decoded teacher images, and latents_s
+        holds the detached student latents for downstream decoding.
+        Mutates d in-place.
+        """
+        total_size = noise.shape[0]
+        unique_steps = torch.unique(n_steps_batch)
+        batch_order: List[int] = []
+        group_latents: List[torch.Tensor] = []
+        d_groups: dict = {}
+
+        if self.loss_config.loss_type == 'GAS':
+            with torch.no_grad():
+                student_latents_disc, _ = self.student_sampler_fn(torch.randn_like(noise))
+            res_disc = self.adv_loss.discriminator_step(
+                FakeSamples=student_latents_disc,
+                RealSamples=latents,
+                is_train=is_train,
+            )
+            d['dis_loss_adv'] = res_disc[0]
+            d['dis_scores_fake'] = res_disc[1]
+            d['dis_signs_fake'] = res_disc[1].sign()
+            d['dis_r1'] = res_disc[2]
+            d['dis_r2'] = res_disc[3]
+
+        for n in unique_steps:
+            mask = (n_steps_batch == n).nonzero(as_tuple=True)[0]
+            group_size = len(mask)
+            group_fraction = group_size / total_size
+
+            cond_n = None
+            if condition is not None:
+                if isinstance(condition, torch.Tensor):
+                    cond_n = condition[mask]
+                else:
+                    cond_n = [condition[i] for i in mask.tolist()]
+
+            latents_n, _ = self.student_sampler_fn(noise[mask], condition=cond_n, n_steps=n.item())
+            teacher_latents_n = latents[mask]
+
+            loss_l1_n = torch.abs(teacher_latents_n - latents_n).mean((1, 2, 3))
+            loss_l2_n = torch.square(teacher_latents_n - latents_n).mean((1, 2, 3))
+
+            per_sample = {
+                'loss_l1_latents': loss_l1_n,
+                'loss_l2_latents': loss_l2_n,
+            }
+
+            if self.loss_config.loss_type == 'GAS':
+                loss_adv_n, gen_res = self.adv_loss.AccumulateGeneratorGradients(
+                    FakeSamples=latents_n,
+                    RealSamples=teacher_latents_n,
+                )
+                per_sample['gen_loss_adv'] = loss_adv_n
+                per_sample['gen_fake_gen'] = gen_res[1]
+                per_sample['gen_signs_fake'] = gen_res[1].sign()
+                loss_total_n = (
+                    self.loss_config.disc_weight * loss_adv_n
+                    + per_sample[self.loss_config.loss_key]
+                )
+            else:
+                loss_total_n = per_sample[self.loss_config.loss_key]
+
+            (loss_total_n.mean() * group_fraction * grad_scale).backward()
+
+            for k, v in per_sample.items():
+                d_groups.setdefault(k, []).append(v.detach())
+
+            group_latents.append(latents_n.detach())
+            batch_order.extend(mask.tolist())
+
+        all_latents = torch.cat(group_latents, dim=0)
+        restore_order = torch.argsort(torch.tensor(batch_order, device=noise.device))
+        student_latents = all_latents[restore_order]
+
+        for k, parts in d_groups.items():
+            d[k] = torch.cat(parts, dim=0)[restore_order]
+
+        d['loss_total'] = d[self.loss_config.loss_key]
+        d['x0_t'] = self.interpolate_lpips(images)
+        d['latents_s'] = student_latents
+        d['_gradients_accumulated'] = True
+
     def forward(
         self,
         batch: SyntDataType,
         return_timesteps: bool = False,
         is_train: bool = True,
         n_steps_override: Optional[int] = None,
+        grad_scale: float = 1.0,
     ) -> dict:
         noise, images, latents, condition = batch[0], batch[1], batch[2], batch[3]
 
@@ -535,14 +731,19 @@ class GSWrapperLatent(GSWrapper):
                 d['timesteps'] = self.solver.get_time_steps(n_steps=nfe_for_log)
 
         if use_mixed_nfe:
-            if n_steps_override is not None:
-                n_steps_batch = torch.full(
-                    (noise.shape[0],), n_steps_override,
-                    dtype=torch.long, device=noise.device,
+            n_steps_batch = (
+                torch.full((noise.shape[0],), n_steps_override, dtype=torch.long, device=noise.device)
+                if n_steps_override is not None
+                else self._sample_n_steps(noise.shape[0], noise.device)
+            )
+            if is_train:
+                # Per-group backward: avoids accumulating activations across all NFE groups.
+                self._train_mixed_nfe_latent_step(
+                    noise, n_steps_batch, latents, images, grad_scale, is_train, condition, d
                 )
+                return d
             else:
-                n_steps_batch = self._sample_n_steps(noise.shape[0], noise.device)
-            student_latents = self._run_student_mixed_nfe(noise, n_steps_batch, condition=condition)
+                student_latents = self._run_student_mixed_nfe(noise, n_steps_batch, condition=condition)
         else:
             student_latents, _ = self.student_sampler_fn(
                 noise,
@@ -571,7 +772,6 @@ class GSWrapperLatent(GSWrapper):
             d['dis_r1'] = res[2]
             d['dis_r2'] = res[3]
 
-            # generator step
             loss_adv, res = self.adv_loss.AccumulateGeneratorGradients(
                 FakeSamples=student_latents,
                 RealSamples=latents
