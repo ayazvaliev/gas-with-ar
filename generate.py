@@ -221,7 +221,7 @@ def main(
                     condition = model.iterate_condition(batch_seeds.tolist())
 
                 with torch.no_grad():
-                    _, images = nfe_sampler_fn(noise=noise, condition=condition)
+                    _, images, _ = nfe_sampler_fn(noise=noise, condition=condition)
 
                 if model_config.type == "EDM":
                     images_np = (
