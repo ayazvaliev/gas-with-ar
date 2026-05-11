@@ -312,29 +312,42 @@ def main(
                 continue
 
         is_multi_nfe = is_ar and len(nfe_list) > 1
-        steps_str = ",".join(str(n) for n in nfe_list)
+
+        # NFEs that still need FID computation (those not yet in the JSON).
+        if skip_generate:
+            nfes_to_process = [
+                nfe for nfe in nfe_list
+                if (run_name, ckpt_iter, nfe) not in existing_fid_keys
+            ]
+        else:
+            nfes_to_process = list(nfe_list)
+
+        if not nfes_to_process:
+            print(f"[skip] All NFEs for '{run_name}' iter {ckpt_iter} already in {results_json}.")
+            continue
 
         # ---- generate ------------------------------------------------
-        # Primary check: skip generation if every NFE already has a FID entry in JSON.
-        # Fallback: skip if the images directory already exists on disk.
-        nfes_with_fid = {
-            nfe for nfe in nfe_list
-            if (run_name, ckpt_iter, nfe) in existing_fid_keys
-        }
-        all_nfes_done = skip_generate and (nfes_with_fid == set(nfe_list))
-
-        if all_nfes_done:
-            print(f"[skip] All NFEs for '{run_name}' iter {ckpt_iter} already in {results_json} — skipping generation.")
-        elif skip_generate and os.path.isdir(os.path.join(exp_outdir, "images")):
-            print(f"[skip] Images already at {exp_outdir}/images — skipping generation.")
+        # Among the NFEs that need FID, determine which also need image generation.
+        if not skip_generate:
+            nfes_need_gen = list(nfes_to_process)
+        elif is_multi_nfe:
+            nfes_need_gen = [
+                nfe for nfe in nfes_to_process
+                if not os.path.isdir(os.path.join(exp_outdir, "images", str(nfe)))
+            ]
         else:
+            images_dir_single = os.path.join(exp_outdir, "images")
+            nfes_need_gen = [] if os.path.isdir(images_dir_single) else list(nfes_to_process)
+
+        if nfes_need_gen:
+            steps_str_gen = ",".join(str(n) for n in sorted(nfes_need_gen))
             gen_cmd = [
                 sys.executable, "generate.py",
                 f"--config={config_path}",
                 f"--outdir={exp_outdir}",
                 f"--seeds={seeds}",
                 f"--batch={batch}",
-                f"--steps={steps_str}",
+                f"--steps={steps_str_gen}",
                 f"--checkpoint_path={ckpt_path}",
             ]
             print(f"\n[generate] {' '.join(gen_cmd)}")
@@ -342,13 +355,11 @@ def main(
             if rc != 0:
                 print(f"[ERROR] generate.py exited with code {rc}. Skipping FID for '{run_name}'.")
                 continue
+        else:
+            print(f"[skip] Images already exist for all needed NFEs — skipping generation.")
 
         # ---- FID per NFE --------------------------------------------
-        for nfe in nfe_list:
-            if skip_generate and (run_name, ckpt_iter, nfe) in existing_fid_keys:
-                print(f"[skip] FID for '{run_name}' NFE={nfe} iter={ckpt_iter} already in {results_json}.")
-                continue
-
+        for nfe in nfes_to_process:
             images_dir = (
                 os.path.join(exp_outdir, "images", str(nfe))
                 if is_multi_nfe
