@@ -273,10 +273,16 @@ def main(
     # Load existing results from JSON (if provided) so we can skip already-done runs.
     existing_results: list[dict] = []
     existing_run_names: set[str] = set()
+    existing_fid_keys: set[tuple[str, str, int]] = set()
     if results_json is not None and os.path.isfile(results_json):
         with open(results_json) as f:
             existing_results = json.load(f)
         existing_run_names = {r["run_name"] for r in existing_results}
+        existing_fid_keys = {
+            (r["run_name"], str(r["ckpt_iter"]), int(r["nfe"]))
+            for r in existing_results
+            if r.get("fid") is not None
+        }
         print(f"Loaded {len(existing_results)} existing result(s) from {results_json}.")
 
     results = list(existing_results)
@@ -309,11 +315,17 @@ def main(
         steps_str = ",".join(str(n) for n in nfe_list)
 
         # ---- generate ------------------------------------------------
-        images_exist = (
-            skip_generate
-            and os.path.isdir(os.path.join(exp_outdir, "images"))
-        )
-        if images_exist:
+        # Primary check: skip generation if every NFE already has a FID entry in JSON.
+        # Fallback: skip if the images directory already exists on disk.
+        nfes_with_fid = {
+            nfe for nfe in nfe_list
+            if (run_name, ckpt_iter, nfe) in existing_fid_keys
+        }
+        all_nfes_done = skip_generate and (nfes_with_fid == set(nfe_list))
+
+        if all_nfes_done:
+            print(f"[skip] All NFEs for '{run_name}' iter {ckpt_iter} already in {results_json} — skipping generation.")
+        elif skip_generate and os.path.isdir(os.path.join(exp_outdir, "images")):
             print(f"[skip] Images already at {exp_outdir}/images — skipping generation.")
         else:
             gen_cmd = [
@@ -332,11 +344,11 @@ def main(
                 continue
 
         # ---- FID per NFE --------------------------------------------
-        if skip_generate and run_name in existing_run_names:
-            print(f"[skip] '{run_name}' already in {results_json} — skipping FID.")
-            continue
-
         for nfe in nfe_list:
+            if skip_generate and (run_name, ckpt_iter, nfe) in existing_fid_keys:
+                print(f"[skip] FID for '{run_name}' NFE={nfe} iter={ckpt_iter} already in {results_json}.")
+                continue
+
             images_dir = (
                 os.path.join(exp_outdir, "images", str(nfe))
                 if is_multi_nfe
