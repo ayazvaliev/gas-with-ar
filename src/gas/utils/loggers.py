@@ -120,23 +120,20 @@ def log_t_steps(t_steps: torch.Tensor, global_step: int, experiment: Experiment,
 
 @torch.no_grad()
 def log_multi_nfe_t_steps(
-    timesteps_dict: Dict[int, torch.Tensor],
-    nfe_list: List[int],
     gs_wrapper: GSWrapper,
+    nfe_list: List[int],
     global_step: int,
     experiment: Experiment,
     key_prefix: str = "t_stats",
 ) -> None:
     """Log timestep trajectories for all NFE values in nfe_list (AR mode).
 
-    Uses precomputed timesteps from the last training batch where available.
-    For any NFE absent from timesteps_dict (not sampled in that batch), falls
-    back to an explicit AR model query.
+    Always queries the AR model fresh so logged timesteps reflect the current
+    (post-optimizer-step) weights, matching what evaluate_wrapper would show.
 
     Args:
-        timesteps_dict: Precomputed NFE → timestep tensor from the last batch.
-        nfe_list: All NFEs defined in the config (guarantees complete coverage).
-        gs_wrapper: Wrapper with AR model, used for fallback queries.
+        gs_wrapper: Wrapper with AR model.
+        nfe_list: All NFEs defined in the config.
         global_step: Current training iteration.
         experiment: Active CometML experiment.
         key_prefix: Metric key prefix.
@@ -148,10 +145,7 @@ def log_multi_nfe_t_steps(
 
     d: Dict[str, float] = {}
     for nfe in sorted(nfe_list):
-        if nfe in timesteps_dict:
-            t_steps = timesteps_dict[nfe].detach().cpu().numpy()
-        else:
-            t_steps = gs_wrapper.solver.get_time_steps(n_steps=nfe).detach().cpu().numpy()
+        t_steps = gs_wrapper.solver.get_time_steps(n_steps=nfe).detach().cpu().numpy()
         ax.plot(t_steps, label=f"NFE={nfe}")
         for i, t in enumerate(t_steps):
             d[f"{key_prefix}/nfe{nfe}/t_{i:02d}"] = float(t)

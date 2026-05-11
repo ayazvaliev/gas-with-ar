@@ -90,9 +90,8 @@ def train(
                     nfe_list = getattr(config.student_solver_config, 'steps_ratios', None)
                     if nfe_list and hasattr(gs_wrapper, 'ar_model'):
                         log_multi_nfe_t_steps(
-                            timesteps_dict=res_d['timesteps'],
-                            nfe_list=[int(k) for k in nfe_list.keys()],
                             gs_wrapper=gs_wrapper,
+                            nfe_list=[int(k) for k in nfe_list.keys()],
                             global_step=global_step,
                             experiment=experiment,
                         )
@@ -131,6 +130,7 @@ def train(
                     experiment=experiment
                 )
 
+                gs_wrapper._ar_out_cache.clear()
                 with ema.average_parameters():
                     evaluate_wrapper(
                         gs_wrapper=gs_wrapper,
@@ -141,6 +141,7 @@ def train(
                         experiment=experiment
                     )
                     log_weights(model=gs_wrapper, global_step=global_step, suff="_ema", experiment=experiment)
+                gs_wrapper._ar_out_cache.clear()
                 gs_wrapper.train()
 
             if global_step % config.logging.checkpoint_freq == 0 or global_step == 1:
